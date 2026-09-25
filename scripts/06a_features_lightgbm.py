@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--benchmark",             action="store_true",
                    help="Profile a small sample; do NOT process full dataset")
     p.add_argument("--benchmark-rows",        type=int,   default=1_000_000)
-    p.add_argument("--compression",           default="snappy",
+    p.add_argument("--compression",           default="zstd",
                    choices=["snappy", "zstd"])
     return p.parse_args()
 
