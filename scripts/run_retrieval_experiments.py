@@ -44,7 +44,9 @@ def parse_args():
     parser.add_argument("--n-corpus", type=int, default=100000, help="Number of corpus items for benchmark evaluation (0 for full dataset)")
     parser.add_argument("--batch-size", type=int, default=2048, help="Embedding batch size")
     parser.add_argument("--nprobes", type=str, default="128,256,512,1024", help="Comma-separated nprobe values to test")
+    parser.add_argument("--nprobe-fixed", type=int, default=512, help="Fixed nprobe value for Step 3 Top-K sweep")
     parser.add_argument("--top-k", type=int, default=50, help="Top-K candidates to evaluate")
+    parser.add_argument("--top-ks", type=str, default="50,100,200,300", help="Comma-separated Top-K values for Step 3 sweep")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--step", type=str, default="1", choices=["all", "1", "3", "4", "5", "6", "7", "8"], help="Which experiment step to run")
     return parser.parse_args()
@@ -375,6 +377,59 @@ def main():
         with open(out_path, "w") as f:
             json.dump(nprobe_results, f, indent=2)
         print(f"\nStep 1 report written to: {out_path}")
+
+    # -------------------------------------------------------------
+    # STEP 3: Top-K Sweep (K=50, 100, 200, 300) at fixed nprobe (512)
+    # -------------------------------------------------------------
+    if args.step in ["all", "3"]:
+        print("\n" + "="*60)
+        print(f" STEP 3: TOP-K SWEEP (at nprobe={args.nprobe_fixed})")
+        print("="*60)
+
+        if 'index' not in locals():
+            print("Training FAISS IVFFlat Index...")
+            index, build_t, effective_nlist = build_ivfflat_index(c_emb_primary, nlist=nlist_val)
+        else:
+            effective_nlist = min(nlist_val, c_emb_primary.shape[0])
+
+        target_nprobe = min(args.nprobe_fixed, effective_nlist)
+        top_k_values = [int(k.strip()) for k in args.top_ks.split(",") if k.strip()]
+        max_k = max(top_k_values)
+
+        print(f"Searching Top-{max_k} candidates at nprobe={target_nprobe}...")
+        scores, indices, search_t = search_ivfflat_index(
+            index, q_emb_primary, effective_nlist=effective_nlist, nprobe=target_nprobe, top_k=max_k
+        )
+
+        eval_res = evaluate_retrieval(s1_ids, corpus_ids, {"Dense_Primary": indices}, exact_dict, gt_dict, k_list=top_k_values)
+
+        topk_results = {}
+        for k in top_k_values:
+            k_key = f"K={k}"
+            rec_dense_pair = eval_res["Dense_Primary"][k_key]["pair_recall_%"]
+            rec_dense_query = eval_res["Dense_Primary"][k_key]["query_recall_%"]
+            rec_hybrid_pair = eval_res["Hybrid_(Exact_U_Dense_Primary)"][k_key]["pair_recall_%"]
+            rec_hybrid_query = eval_res["Hybrid_(Exact_U_Dense_Primary)"][k_key]["query_recall_%"]
+            avg_cands = eval_res["Hybrid_(Exact_U_Dense_Primary)"][k_key]["avg_candidates_per_query"]
+            tot_cands = eval_res["Hybrid_(Exact_U_Dense_Primary)"][k_key]["total_candidates"]
+
+            topk_results[f"K_{k}"] = {
+                "top_k": k,
+                "nprobe": target_nprobe,
+                "dense_pair_recall_%": rec_dense_pair,
+                "dense_query_recall_%": rec_dense_query,
+                "hybrid_pair_recall_%": rec_hybrid_pair,
+                "hybrid_query_recall_%": rec_hybrid_query,
+                "avg_candidates_per_s1": avg_cands,
+                "total_candidate_pairs": tot_cands,
+                "search_runtime_sec": round(search_t, 3)
+            }
+            print(f"  K={k:3d} | Dense Pair: {rec_dense_pair:6.2f}% | Dense Query: {rec_dense_query:6.2f}% | Hybrid Pair: {rec_hybrid_pair:6.2f}% | Hybrid Query: {rec_hybrid_query:6.2f}% | Avg Cands: {avg_cands:6.2f} | Time: {search_t:.3f}s")
+
+        out_path = os.path.join(args.output_dir, "step3_topk_sweep.json")
+        with open(out_path, "w") as f:
+            json.dump(topk_results, f, indent=2)
+        print(f"\nStep 3 report written to: {out_path}")
 
 if __name__ == "__main__":
     main()
