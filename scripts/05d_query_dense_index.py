@@ -143,7 +143,25 @@ def main():
     
     print(f"Searching Top-{args.top_k} candidates across {total_corpus_rows} corpus...")
     t0 = time.time()
-    scores, indices = search_index.search(query_np, args.top_k)
+    
+    # FAISS GPU search requires temporary buffers. 
+    # Searching 2.2M queries at once causes a 4.3 GB TemporaryMemoryOverflow.
+    # We must chunk the queries during search.
+    all_scores = []
+    all_indices = []
+    search_batch_size = 50000
+    
+    for i in range(0, num_queries, search_batch_size):
+        end_idx = min(i + search_batch_size, num_queries)
+        q_batch = query_np[i:end_idx]
+        s_batch, i_batch = search_index.search(q_batch, args.top_k)
+        all_scores.append(s_batch)
+        all_indices.append(i_batch)
+        print(f"  Searched {end_idx}/{num_queries} queries.")
+        
+    scores = np.vstack(all_scores)
+    indices = np.vstack(all_indices)
+    
     print(f"Search completed in {time.time()-t0:.1f}s.")
     
     # ---------------------------------------------------------
