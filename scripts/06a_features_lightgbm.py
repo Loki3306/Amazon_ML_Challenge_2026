@@ -236,6 +236,66 @@ class TokenIndex:
         return out
 
 
+from concurrent.futures import ThreadPoolExecutor
+
+def _paired_sim_worker(s1_chunk, cand_chunk, scorer):
+    return np.array([scorer(a, b) for a, b in zip(s1_chunk, cand_chunk)], dtype=np.float32)
+
+def parallel_paired_sim(s1_list, cand_list, scorer, workers: int) -> np.ndarray:
+    n = len(s1_list)
+    if n == 0:
+        return np.array([], dtype=np.float32)
+    if workers <= 1:
+        return _paired_sim_worker(s1_list, cand_list, scorer)
+        
+    chunk_size = max(1, n // (workers * 4))
+    futures = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for i in range(0, n, chunk_size):
+            futures.append(
+                executor.submit(_paired_sim_worker, 
+                                s1_list[i:i+chunk_size], 
+                                cand_list[i:i+chunk_size], 
+                                scorer)
+            )
+    return np.concatenate([f.result() for f in futures])
+
+def _token_jaccard_worker(s1_addrs, cand_addrs):
+    tok_s1 = TokenIndex(s1_addrs)
+    tok_cand = TokenIndex(cand_addrs)
+    n = len(s1_addrs)
+    out = np.ones(n, dtype=np.float32)
+    for i in range(n):
+        sa = tok_s1.sets[i]
+        sb = tok_cand.sets[i]
+        if not sa and not sb:
+            out[i] = 1.0
+        elif not sa or not sb:
+            out[i] = 0.0
+        else:
+            inter = len(sa & sb)
+            out[i] = inter / (len(sa) + len(sb) - inter)
+    return out
+
+def parallel_token_jaccard(s1_list, cand_list, workers: int) -> np.ndarray:
+    n = len(s1_list)
+    if n == 0:
+        return np.array([], dtype=np.float32)
+    if workers <= 1:
+        return _token_jaccard_worker(s1_list, cand_list)
+        
+    chunk_size = max(1, n // (workers * 4))
+    futures = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for i in range(0, n, chunk_size):
+            futures.append(
+                executor.submit(_token_jaccard_worker, 
+                                s1_list[i:i+chunk_size], 
+                                cand_list[i:i+chunk_size])
+            )
+    return np.concatenate([f.result() for f in futures])
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CORE FEATURE COMPUTATION  (one chunk)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -270,10 +330,10 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
     addr_exact_norm = addr_exact_mask.astype(np.float32)
 
     # ── G1: Name similarities ─────────────────────────────────────────────────
-    # Where exact, short-circuit to 1.0; call cdist only on non-exact rows.
     name_jw  = np.ones(n, dtype=np.float32)
     name_jar = np.ones(n, dtype=np.float32)
     name_lev = np.ones(n, dtype=np.float32)
+    name_tok_jac = np.ones(n, dtype=np.float32)
 
     need_name = ~name_exact_mask
     if need_name.any():
@@ -281,42 +341,10 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         cand_n_sub = [cand_names[i] for i in range(n) if need_name[i]]
         idx        = np.where(need_name)[0]
 
-        # cdist: returns n×1 matrix when queries == choices element-wise
-        # Use cdist with paired mode (scorer on element i vs element i)
-        jw_mat  = rf_process.cdist(s1_n_sub, cand_n_sub,
-                                   scorer=JaroWinkler.normalized_similarity,
-                                   workers=workers, dtype=np.float32)
-        jar_mat = rf_process.cdist(s1_n_sub, cand_n_sub,
-                                   scorer=Jaro.normalized_similarity,
-                                   workers=workers, dtype=np.float32)
-        lev_mat = rf_process.cdist(s1_n_sub, cand_n_sub,
-                                   scorer=Levenshtein.normalized_similarity,
-                                   workers=workers, dtype=np.float32)
-
-        # cdist returns full NxM matrix; we only want the diagonal
-        diag_jw  = np.diag(jw_mat)
-        diag_jar = np.diag(jar_mat)
-        diag_lev = np.diag(lev_mat)
-
-        name_jw[idx]  = diag_jw
-        name_jar[idx] = diag_jar
-        name_lev[idx] = diag_lev
-
-    # ── G1: Name token Jaccard ────────────────────────────────────────────────
-    name_tok_jac = np.ones(n, dtype=np.float32)
-    if need_name.any():
-        tok_idx_s1   = TokenIndex(s1_names)
-        tok_idx_cand = TokenIndex(cand_names)
-        for i in np.where(need_name)[0]:
-            sa = tok_idx_s1.sets[i]
-            sb = tok_idx_cand.sets[i]
-            if not sa and not sb:
-                name_tok_jac[i] = 1.0
-            elif not sa or not sb:
-                name_tok_jac[i] = 0.0
-            else:
-                inter = len(sa & sb)
-                name_tok_jac[i] = inter / (len(sa) + len(sb) - inter)
+        name_jw[idx]  = parallel_paired_sim(s1_n_sub, cand_n_sub, JaroWinkler.normalized_similarity, workers)
+        name_jar[idx] = parallel_paired_sim(s1_n_sub, cand_n_sub, Jaro.normalized_similarity, workers)
+        name_lev[idx] = parallel_paired_sim(s1_n_sub, cand_n_sub, Levenshtein.normalized_similarity, workers)
+        name_tok_jac[idx] = parallel_token_jaccard(s1_n_sub, cand_n_sub, workers)
 
     # ── G2: Address similarities ──────────────────────────────────────────────
     addr_jw  = np.ones(n, dtype=np.float32)
@@ -329,29 +357,9 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         cand_a_sub = [cand_addrs[i] for i in range(n) if need_addr[i]]
         idx_a      = np.where(need_addr)[0]
 
-        jw_mat_a  = rf_process.cdist(s1_a_sub, cand_a_sub,
-                                     scorer=JaroWinkler.normalized_similarity,
-                                     workers=workers, dtype=np.float32)
-        lev_mat_a = rf_process.cdist(s1_a_sub, cand_a_sub,
-                                     scorer=Levenshtein.normalized_similarity,
-                                     workers=workers, dtype=np.float32)
-
-        addr_jw[idx_a]  = np.diag(jw_mat_a)
-        addr_lev[idx_a] = np.diag(lev_mat_a)
-
-        # Token Jaccard for addresses
-        tok_s1_a   = TokenIndex(s1_addrs)
-        tok_cand_a = TokenIndex(cand_addrs)
-        for i in idx_a:
-            sa = tok_s1_a.sets[i]
-            sb = tok_cand_a.sets[i]
-            if not sa and not sb:
-                addr_tok[i] = 1.0
-            elif not sa or not sb:
-                addr_tok[i] = 0.0
-            else:
-                inter = len(sa & sb)
-                addr_tok[i] = inter / (len(sa) + len(sb) - inter)
+        addr_jw[idx_a]  = parallel_paired_sim(s1_a_sub, cand_a_sub, JaroWinkler.normalized_similarity, workers)
+        addr_lev[idx_a] = parallel_paired_sim(s1_a_sub, cand_a_sub, Levenshtein.normalized_similarity, workers)
+        addr_tok[idx_a] = parallel_token_jaccard(s1_a_sub, cand_a_sub, workers)
 
     # ── G4: Retrieval signals (already numeric) ───────────────────────────────
     dense_scores = chunk["dense_score"].to_numpy().astype(np.float32)
