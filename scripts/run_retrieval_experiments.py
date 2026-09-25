@@ -285,12 +285,15 @@ def main():
     print(f"Loading SentenceTransformer '{args.model_name}' on device: {device}...")
     model = SentenceTransformer(args.model_name, device=device)
 
-    print("Encoding primary representation: 'name_address_country'...")
+    print("Encoding primary representation: 'name_address_country'...", flush=True)
     q_texts_primary = prepare_text(s1_df, "name_address_country")
     c_texts_primary = prepare_text(corpus_df, "name_address_country")
 
-    q_emb_primary = model.encode(q_texts_primary, batch_size=args.batch_size, normalize_embeddings=True)
-    c_emb_primary = model.encode(c_texts_primary, batch_size=args.batch_size, normalize_embeddings=True)
+    print(f"Encoding {len(q_texts_primary):,} S1 query texts...", flush=True)
+    q_emb_primary = model.encode(q_texts_primary, batch_size=args.batch_size, show_progress_bar=True, normalize_embeddings=True)
+
+    print(f"Encoding {len(c_texts_primary):,} corpus texts...", flush=True)
+    c_emb_primary = model.encode(c_texts_primary, batch_size=args.batch_size, show_progress_bar=True, normalize_embeddings=True)
 
     nlist_val = min(1024, max(16, len(corpus_ids) // 10))
 
