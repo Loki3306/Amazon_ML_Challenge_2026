@@ -101,7 +101,7 @@ def main():
     d = 384
     nlist = 16384
     quantizer = faiss.IndexFlatIP(d)
-    cpu_index = faiss.IndexIVFFlat(quantizer, d, nlist, faiss.METRIC_INNER_PRODUCT)
+    cpu_index = faiss.IndexIVFScalarQuantizer(quantizer, d, nlist, faiss.ScalarQuantizer.QT_8bit, faiss.METRIC_INNER_PRODUCT)
     
     t0 = time.time()
     print(f"Training IVFFlat on 1,000,000 samples for {nlist} clusters...")
@@ -132,7 +132,7 @@ def main():
     # ---------------------------------------------------------
     # STEP 4: ADD VECTORS DIRECTLY TO GPU INDEX (Prevents CPU OOM)
     # ---------------------------------------------------------
-    print("Populating Index with 10.3M vectors directly to GPUs...")
+    print("Populating Index with 10.3M vectors (SQ8 Compressed to 4GB)...")
     t0 = time.time()
     chunk_size = 200_000
     for i in range(0, total_corpus_rows, chunk_size):
