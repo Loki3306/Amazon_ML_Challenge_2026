@@ -77,9 +77,11 @@ def run_benchmark():
     
     print("Loading Ground Truth...")
     try:
-        # Assuming train.csv has 'source1_entity_id' and 'matched_entity_ids'
-        # Adjust if column names differ
-        gt_df = pl.read_csv(args.ground_truth)
+        if args.ground_truth.endswith(".tsv"):
+            gt_df = pl.read_csv(args.ground_truth, separator="\t")
+        else:
+            gt_df = pl.read_csv(args.ground_truth)
+            
         col_s1 = gt_df.columns[0]
         col_s2 = gt_df.columns[1]
         
