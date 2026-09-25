@@ -1,0 +1,16 @@
+# Core Kaggle Requirements for Amazon ML Challenge 2026
+# (These match the Kaggle T4x2 environment where F0.5=0.8040 was achieved)
+
+faiss-gpu
+faiss-cpu
+rapidfuzz
+sentence-transformers
+polars
+lightgbm
+scikit-learn
+numpy
+pandas
+sparse_dot_topn
+tqdm
+pyarrow
+fastparquet
