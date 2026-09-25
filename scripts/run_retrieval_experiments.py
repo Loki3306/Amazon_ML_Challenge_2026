@@ -69,18 +69,25 @@ def prepare_text(df: pl.DataFrame, representation: str) -> list[str]:
     else:
         raise ValueError(f"Unknown representation: {representation}")
 
+def find_file_in_search_paths(target_filename: str, search_roots: list[str]) -> str:
+    for root_path in search_roots:
+        if os.path.exists(root_path):
+            if os.path.isfile(root_path) and os.path.basename(root_path) == target_filename:
+                return root_path
+            for root, _, files in os.walk(root_path):
+                if target_filename in files:
+                    return os.path.join(root, target_filename)
+    return ""
+
 def load_ground_truth(gt_path: str, valid_corpus_set: set[str] = None) -> dict[str, set[str]]:
     if not os.path.exists(gt_path):
-        fallbacks = [
-            "student_resource/dataset/train/train_ground_truth.tsv",
-            "data/student_resource/dataset/train/train_ground_truth.tsv",
-            "/kaggle/input/student-resource-amazonml/dataset/train/train_ground_truth.tsv",
-            "/kaggle/input/datasets/lokeshgile/student-resource-amazonml/dataset/train/train_ground_truth.tsv"
-        ]
-        for fb in fallbacks:
-            if os.path.exists(fb):
-                gt_path = fb
-                break
+        found_gt = find_file_in_search_paths("train_ground_truth.tsv", ["/kaggle/input", ".", "student_resource", "data"])
+        if found_gt:
+            gt_path = found_gt
+
+    if not os.path.exists(gt_path):
+        raise FileNotFoundError(f"Could not find ground truth file: '{gt_path}'. Please verify dataset is attached on Kaggle.")
+
     print(f"Loading Ground Truth from {gt_path}...")
     gt_df = pl.read_csv(gt_path, separator="\t")
     gt_dict = {}
@@ -102,24 +109,21 @@ def load_dataset_subset(data_dir: str, n_queries: int, n_corpus: int, input_dir:
     if not all(os.path.exists(p) for p in [s1_path, s2_path, s3_path]):
         print("Processed parquet files missing. Preparing from raw TSV files...")
         os.makedirs(os.path.join(data_dir, "train"), exist_ok=True)
+
         raw_s1 = os.path.join(input_dir, "train_source1.tsv")
         raw_s2 = os.path.join(input_dir, "train_source2.tsv")
         raw_s3 = os.path.join(input_dir, "train_source3.tsv")
 
-        # Fallback search for input_dir if specified path is invalid
         if not os.path.exists(raw_s1):
-            fallbacks = [
-                "/kaggle/input/student-resource-amazonml/dataset/train",
-                "/kaggle/input/datasets/lokeshgile/student-resource-amazonml/dataset/train",
-                "student_resource/dataset/train"
-            ]
-            for fb in fallbacks:
-                if os.path.exists(os.path.join(fb, "train_source1.tsv")):
-                    input_dir = fb
-                    raw_s1 = os.path.join(input_dir, "train_source1.tsv")
-                    raw_s2 = os.path.join(input_dir, "train_source2.tsv")
-                    raw_s3 = os.path.join(input_dir, "train_source3.tsv")
-                    break
+            found_s1 = find_file_in_search_paths("train_source1.tsv", ["/kaggle/input", ".", "student_resource", "data"])
+            if found_s1:
+                input_dir = os.path.dirname(found_s1)
+                raw_s1 = os.path.join(input_dir, "train_source1.tsv")
+                raw_s2 = os.path.join(input_dir, "train_source2.tsv")
+                raw_s3 = os.path.join(input_dir, "train_source3.tsv")
+
+        if not os.path.exists(raw_s1):
+            raise FileNotFoundError(f"Could not locate 'train_source1.tsv' in input directory '{input_dir}' or under '/kaggle/input'.")
 
         schema = {
             "entity_id": pl.Utf8,
