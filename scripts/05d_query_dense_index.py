@@ -39,46 +39,56 @@ def main():
     mapping_df = pl.read_parquet(mapping_path)
     total_corpus_rows = mapping_df.height
     
-    # 2. Build FAISS Index
-    # We must explicitly load the memmap into RAM, convert to FP32, and add to FAISS
-    # Wait, 10.3M * 384 * 4 bytes (FP32) = 15.8 GB in RAM. 
-    # Kaggle provides 30GB CPU RAM, so we can convert it in memory before moving to GPU.
-    print(f"Loading Memmap ({total_corpus_rows} rows) into RAM (FP32 conversion)...")
+    # 2. Build FAISS Index (IVFFlat Approximate Nearest Neighbors)
+    print(f"Loading Memmap ({total_corpus_rows} rows) for IVFFlat Training...")
     t0 = time.time()
     
     # Memory map the FP16 array
     memmap_array = np.memmap(emb_path, dtype='float16', mode='r', shape=(total_corpus_rows, 384))
     
-    # Instantiate Flat Index (Inner Product for Cosine Sim)
-    cpu_index = faiss.IndexFlatIP(384)
+    # We use IVFFlat to reduce 22 trillion calculations to a tiny fraction
+    d = 384
+    nlist = 65536  # Number of Voronoi cells (clusters)
+    quantizer = faiss.IndexFlatIP(d)
+    cpu_index = faiss.IndexIVFFlat(quantizer, d, nlist, faiss.METRIC_INNER_PRODUCT)
     
-    # To prevent OOM, we can add to CPU index in chunks, converting to float32 on the fly
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda":
+        print("Transferring untrained IVFFlat to GPUs (Sharded & FP16)...")
+        co = faiss.GpuMultipleClonerOptions()
+        co.shard = True
+        co.useFloat16 = True
+        index = faiss.index_cpu_to_all_gpus(cpu_index, co=co)
+    else:
+        index = cpu_index
+        print("WARNING: CUDA not detected, running on CPU.")
+
+    print("Training IVFFlat on 2,000,000 samples...")
+    # Train on first 2M rows (sufficient for 10M dataset)
+    train_sample = memmap_array[:2_000_000].astype(np.float32)
+    index.train(train_sample)
+    del train_sample
+    print(f"Training completed in {time.time()-t0:.1f}s.")
+    
+    print("Populating Index with 10.3M vectors...")
+    t0 = time.time()
     chunk_size = 1_000_000
     for i in range(0, total_corpus_rows, chunk_size):
         end_idx = min(i + chunk_size, total_corpus_rows)
         fp32_chunk = memmap_array[i:end_idx].astype(np.float32)
-        cpu_index.add(fp32_chunk)
-        print(f"  Added {end_idx}/{total_corpus_rows} vectors to CPU index.")
+        index.add(fp32_chunk)
+        print(f"  Added {end_idx}/{total_corpus_rows} vectors.")
         
-    print(f"FAISS CPU Index built in {time.time()-t0:.1f}s.")
+    print(f"Index populated in {time.time()-t0:.1f}s.")
     
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cuda":
-        print("Transferring FAISS Index to GPUs (Sharded & FP16)...")
-        t0 = time.time()
-        co = faiss.GpuMultipleClonerOptions()
-        co.shard = True
-        co.useFloat16 = True
-        gpu_index = faiss.index_cpu_to_all_gpus(cpu_index, co=co)
-        print(f"FAISS multi-GPU Index ready in {time.time()-t0:.1f}s.")
-        index = gpu_index
-    else:
-        print("WARNING: CUDA not detected, running FAISS on CPU.")
-        index = cpu_index
-        
+    # Set nprobe (number of clusters to search). 64 out of 65536 = ~0.1% of the corpus searched per query
+    # faiss.GpuIndexIVF has a setNumProbes method in Python (via SWIG) or we can set nprobe on CPU index and clone again, 
+    # but the easiest way to set nprobe on a sharded GPU index is through GpuParameterSpace.
+    ps = faiss.GpuParameterSpace()
+    ps.set_index_parameter(index, "nprobe", 64)
+    
     # Free up RAM (we don't need memmap anymore)
     del memmap_array
-    del cpu_index
     gc.collect()
     
     # 3. Load Queries
