@@ -39,9 +39,11 @@ def parse_args():
     parser.add_argument("--candidates-dir", type=str, default="data/candidates", help="Path to candidates parquet directory")
     parser.add_argument("--output-dir", type=str, default="reports/retrieval", help="Path to save experiment JSON reports")
     parser.add_argument("--model-name", type=str, default="all-MiniLM-L6-v2", help="Embedding model name")
-    parser.add_argument("--n-queries", type=int, default=10000, help="Number of queries for benchmark evaluation")
-    parser.add_argument("--n-corpus", type=int, default=100000, help="Number of corpus items for benchmark evaluation")
+    parser.add_argument("--n-queries", type=int, default=10000, help="Number of queries for benchmark evaluation (0 for full dataset)")
+    parser.add_argument("--n-corpus", type=int, default=100000, help="Number of corpus items for benchmark evaluation (0 for full dataset)")
     parser.add_argument("--batch-size", type=int, default=2048, help="Embedding batch size")
+    parser.add_argument("--nprobes", type=str, default="128,256,512,1024", help="Comma-separated nprobe values to test")
+    parser.add_argument("--top-k", type=int, default=50, help="Top-K candidates to evaluate")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--step", type=str, default="1", choices=["all", "1", "3", "4", "5", "6", "7", "8"], help="Which experiment step to run")
     return parser.parse_args()
@@ -67,6 +69,17 @@ def prepare_text(df: pl.DataFrame, representation: str) -> list[str]:
         raise ValueError(f"Unknown representation: {representation}")
 
 def load_ground_truth(gt_path: str, valid_corpus_set: set[str] = None) -> dict[str, set[str]]:
+    if not os.path.exists(gt_path):
+        fallbacks = [
+            "student_resource/dataset/train/train_ground_truth.tsv",
+            "data/student_resource/dataset/train/train_ground_truth.tsv",
+            "/kaggle/input/student-resource-amazonml/dataset/train/train_ground_truth.tsv",
+            "/kaggle/input/datasets/lokeshgile/student-resource-amazonml/dataset/train/train_ground_truth.tsv"
+        ]
+        for fb in fallbacks:
+            if os.path.exists(fb):
+                gt_path = fb
+                break
     print(f"Loading Ground Truth from {gt_path}...")
     gt_df = pl.read_csv(gt_path, separator="\t")
     gt_dict = {}
@@ -177,7 +190,7 @@ def evaluate_retrieval(s1_ids: np.ndarray, corpus_ids: np.ndarray, dense_indices
 
     return results
 
-def build_and_search_ivfflat(corpus_embeddings: np.ndarray, query_embeddings: np.ndarray, nlist: int, nprobe: int, top_k: int):
+def build_ivfflat_index(corpus_embeddings: np.ndarray, nlist: int):
     d = corpus_embeddings.shape[1]
     quantizer = faiss.IndexFlatIP(d)
     effective_nlist = min(nlist, corpus_embeddings.shape[0])
@@ -189,13 +202,16 @@ def build_and_search_ivfflat(corpus_embeddings: np.ndarray, query_embeddings: np
     index.add(train_samples)
     build_time = time.time() - t0
 
+    return index, build_time, effective_nlist
+
+def search_ivfflat_index(index: faiss.IndexIVFFlat, query_embeddings: np.ndarray, effective_nlist: int, nprobe: int, top_k: int):
     index.nprobe = min(nprobe, effective_nlist)
 
     t0 = time.time()
     scores, indices = index.search(query_embeddings.astype(np.float32), top_k)
     search_time = time.time() - t0
 
-    return scores, indices, build_time, search_time
+    return scores, indices, search_time
 
 def main():
     args = parse_args()
@@ -238,37 +254,44 @@ def main():
     # -------------------------------------------------------------
     if args.step in ["all", "1"]:
         print("\n" + "="*60)
-        print(" STEP 1: NPROBE SWEEP (Top-K=50)")
+        print(f" STEP 1: NPROBE SWEEP (Top-K={args.top_k})")
         print("="*60)
 
+        print("Training FAISS IVFFlat Index ONCE...")
+        index, build_t, effective_nlist = build_ivfflat_index(c_emb_primary, nlist=nlist_val)
+        print(f"Index built in {build_t:.3f}s with {effective_nlist} clusters.")
+
         nprobe_results = {}
-        nprobes_to_test = [128, 256, 512, 1024]
-        # Cap nprobes to <= nlist_val for smaller benchmark subset
-        nprobes_to_test = [p for p in nprobes_to_test if p <= nlist_val] or [nlist_val]
+        raw_nprobes = [int(p.strip()) for p in args.nprobes.split(",") if p.strip()]
+        # Cap nprobes to <= effective_nlist for smaller benchmark subset
+        nprobes_to_test = [p for p in raw_nprobes if p <= effective_nlist] or [effective_nlist]
 
         for p in nprobes_to_test:
-            scores, indices, build_t, search_t = build_and_search_ivfflat(
-                c_emb_primary, q_emb_primary, nlist=nlist_val, nprobe=p, top_k=50
+            scores, indices, search_t = search_ivfflat_index(
+                index, q_emb_primary, effective_nlist=effective_nlist, nprobe=p, top_k=args.top_k
             )
-            eval_res = evaluate_retrieval(s1_ids, corpus_ids, {"Dense_Primary": indices}, exact_dict, gt_dict, k_list=[50])
+            eval_res = evaluate_retrieval(s1_ids, corpus_ids, {"Dense_Primary": indices}, exact_dict, gt_dict, k_list=[args.top_k])
 
-            rec_dense = eval_res["Dense_Primary"]["K=50"]["pair_recall_%"]
-            rec_hybrid = eval_res["Hybrid_(Exact_U_Dense_Primary)"]["K=50"]["pair_recall_%"]
-            rec_query = eval_res["Hybrid_(Exact_U_Dense_Primary)"]["K=50"]["query_recall_%"]
-            avg_cands = eval_res["Hybrid_(Exact_U_Dense_Primary)"]["K=50"]["avg_candidates_per_query"]
-            tot_cands = eval_res["Hybrid_(Exact_U_Dense_Primary)"]["K=50"]["total_candidates"]
+            k_key = f"K={args.top_k}"
+            rec_dense_pair = eval_res["Dense_Primary"][k_key]["pair_recall_%"]
+            rec_dense_query = eval_res["Dense_Primary"][k_key]["query_recall_%"]
+            rec_hybrid_pair = eval_res["Hybrid_(Exact_U_Dense_Primary)"][k_key]["pair_recall_%"]
+            rec_hybrid_query = eval_res["Hybrid_(Exact_U_Dense_Primary)"][k_key]["query_recall_%"]
+            avg_cands = eval_res["Hybrid_(Exact_U_Dense_Primary)"][k_key]["avg_candidates_per_query"]
+            tot_cands = eval_res["Hybrid_(Exact_U_Dense_Primary)"][k_key]["total_candidates"]
 
             nprobe_results[f"nprobe_{p}"] = {
                 "nprobe": p,
-                "top_k": 50,
-                "dense_pair_recall_%": rec_dense,
-                "hybrid_pair_recall_%": rec_hybrid,
-                "hybrid_query_recall_%": rec_query,
+                "top_k": args.top_k,
+                "dense_pair_recall_%": rec_dense_pair,
+                "dense_query_recall_%": rec_dense_query,
+                "hybrid_pair_recall_%": rec_hybrid_pair,
+                "hybrid_query_recall_%": rec_hybrid_query,
                 "avg_candidates_per_s1": avg_cands,
-                "total_candidates": tot_cands,
+                "total_candidate_pairs": tot_cands,
                 "search_runtime_sec": round(search_t, 3)
             }
-            print(f"  nprobe={p:4d} | Dense Recall: {rec_dense:6.2f}% | Hybrid Recall: {rec_hybrid:6.2f}% | Query Recall: {rec_query:6.2f}% | Avg Cands: {avg_cands:6.2f} | Time: {search_t:.3f}s")
+            print(f"  nprobe={p:4d} | Dense Pair: {rec_dense_pair:6.2f}% | Dense Query: {rec_dense_query:6.2f}% | Hybrid Pair: {rec_hybrid_pair:6.2f}% | Hybrid Query: {rec_hybrid_query:6.2f}% | Avg Cands: {avg_cands:6.2f} | Time: {search_t:.3f}s")
 
         out_path = os.path.join(args.output_dir, "step1_nprobe_sweep.json")
         with open(out_path, "w") as f:
