@@ -64,10 +64,12 @@ def main():
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda":
-        print("Transferring FAISS Index to GPUs...")
+        print("Transferring FAISS Index to GPUs (Sharded & FP16)...")
         t0 = time.time()
-        # This function shards the flat index across all available GPUs
-        gpu_index = faiss.index_cpu_to_all_gpus(cpu_index)
+        co = faiss.GpuMultipleClonerOptions()
+        co.shard = True
+        co.useFloat16 = True
+        gpu_index = faiss.index_cpu_to_all_gpus(cpu_index, co=co)
         print(f"FAISS multi-GPU Index ready in {time.time()-t0:.1f}s.")
         index = gpu_index
     else:
