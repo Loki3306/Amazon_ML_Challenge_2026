@@ -101,17 +101,11 @@ def v3_sim(s1_list, cand_list, scorer, workers):
     return np.concatenate([f.result() for f in futures])
 
 def v3_tok(s1_list, cand_list, workers):
-    # Pre-tokenize uniques to avoid redundant work (especially for S1 queries!)
+    # Pre-tokenize uniques to avoid redundant work
     def get_token_sets(strings):
         unique_strs = set(strings)
-        vocab = {}
-        str_to_set = {}
-        for s in unique_strs:
-            ids = set()
-            for tok in s.split():
-                if tok not in vocab: vocab[tok] = len(vocab)
-                ids.add(vocab[tok])
-            str_to_set[s] = frozenset(ids)
+        # Just use string tokens directly — Python string hashing is very fast
+        str_to_set = {s: frozenset(s.split()) for s in unique_strs}
         return [str_to_set[s] for s in strings]
 
     s1_sets = get_token_sets(s1_list)
