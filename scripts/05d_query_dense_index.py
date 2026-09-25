@@ -14,7 +14,7 @@ def parse_args():
     parser.add_argument("--index-dir", type=str, default="data/dense_index", help="Output directory of 5C")
     parser.add_argument("--output-dir", type=str, default="data/candidates", help="Where to save candidates")
     parser.add_argument("--model-name", type=str, default="all-MiniLM-L6-v2", help="SentenceTransformer model")
-    parser.add_argument("--top-k", type=int, default=50, help="Number of candidates to retrieve")
+    parser.add_argument("--top-k", type=int, default=10, help="Number of candidates to retrieve")
     parser.add_argument("--batch-size", type=int, default=2048, help="Batch size for query embedding")
     return parser.parse_args()
 
@@ -34,64 +34,11 @@ def main():
         print(f"Missing index files in {args.index_dir}. Run 05c_build_dense_index.py first.")
         return
         
-    # 1. Load Mapping
-    print("Loading FAISS row mapping...")
-    mapping_df = pl.read_parquet(mapping_path)
-    total_corpus_rows = mapping_df.height
-    
-    # 2. Build FAISS Index (IVFFlat Approximate Nearest Neighbors)
-    print(f"Loading Memmap ({total_corpus_rows} rows) for IVFFlat Training...")
-    t0 = time.time()
-    
-    # Memory map the FP16 array
-    memmap_array = np.memmap(emb_path, dtype='float16', mode='r', shape=(total_corpus_rows, 384))
-    
-    # We use IVFFlat to reduce 22 trillion calculations to a tiny fraction
-    d = 384
-    nlist = 16384  # 16k clusters is much faster to train on GPU than 65k
-    quantizer = faiss.IndexFlatIP(d)
-    cpu_index = faiss.IndexIVFFlat(quantizer, d, nlist, faiss.METRIC_INNER_PRODUCT)
-    
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cuda":
-        print("Transferring untrained IVFFlat to GPUs (Sharded & FP16)...")
-        co = faiss.GpuMultipleClonerOptions()
-        co.shard = True
-        co.useFloat16 = True
-        index = faiss.index_cpu_to_all_gpus(cpu_index, co=co)
-    else:
-        index = cpu_index
-        print("WARNING: CUDA not detected, running on CPU.")
-
-    print(f"Training IVFFlat on 1,000,000 samples for {nlist} clusters...")
-    # Train on first 1M rows (perfect for 16k centroids)
-    train_sample = memmap_array[:1_000_000].astype(np.float32)
-    index.train(train_sample)
-    del train_sample
-    print(f"Training completed in {time.time()-t0:.1f}s.")
     
-    print("Populating Index with 10.3M vectors...")
-    t0 = time.time()
-    chunk_size = 1_000_000
-    for i in range(0, total_corpus_rows, chunk_size):
-        end_idx = min(i + chunk_size, total_corpus_rows)
-        fp32_chunk = memmap_array[i:end_idx].astype(np.float32)
-        index.add(fp32_chunk)
-        print(f"  Added {end_idx}/{total_corpus_rows} vectors.")
-        
-    print(f"Index populated in {time.time()-t0:.1f}s.")
-    
-    # Set nprobe (number of clusters to search). 32 out of 16384 = ~0.2% of the corpus searched per query
-    # faiss.GpuIndexIVF has a setNumProbes method in Python (via SWIG) or we can set nprobe on CPU index and clone again, 
-    # but the easiest way to set nprobe on a sharded GPU index is through GpuParameterSpace.
-    ps = faiss.GpuParameterSpace()
-    ps.set_index_parameter(index, "nprobe", 32)
-    
-    # Free up RAM (we don't need memmap anymore)
-    del memmap_array
-    gc.collect()
-    
-    # 3. Load Queries
+    # ---------------------------------------------------------
+    # STEP 1: ENCODE QUERIES FIRST (To avoid memory fragmentation)
+    # ---------------------------------------------------------
     print("Loading S1 Queries...")
     s1_path = os.path.join(args.data_dir, "train", "train_source1.parquet")
     select_cols = ["entity_id", "source", "name_norm", "address_norm", "country"]
@@ -105,7 +52,6 @@ def main():
     query_ids = s1_df["entity_id"].to_list()
     del s1_df
     
-    # 4. Encode Queries
     print("Encoding Queries...")
     t0 = time.time()
     model = SentenceTransformer(args.model_name, device=device)
@@ -118,33 +64,103 @@ def main():
         
     print(f"Queries encoded in {time.time()-t0:.1f}s.")
     
-    # 5. Search
+    # Free the model and clear GPU cache completely!
+    del model
+    del query_emb
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    gc.collect()
+
+    # ---------------------------------------------------------
+    # STEP 2: TRAIN IVFFLAT INDEX
+    # ---------------------------------------------------------
+    print("Loading FAISS row mapping...")
+    mapping_df = pl.read_parquet(mapping_path)
+    total_corpus_rows = mapping_df.height
+    
+    print(f"Loading Memmap ({total_corpus_rows} rows) for IVFFlat Training...")
+    memmap_array = np.memmap(emb_path, dtype='float16', mode='r', shape=(total_corpus_rows, 384))
+    
+    d = 384
+    nlist = 16384
+    quantizer = faiss.IndexFlatIP(d)
+    cpu_index = faiss.IndexIVFFlat(quantizer, d, nlist, faiss.METRIC_INNER_PRODUCT)
+    
+    t0 = time.time()
+    print(f"Training IVFFlat on 1,000,000 samples for {nlist} clusters...")
+    train_sample = memmap_array[:1_000_000].astype(np.float32)
+    
+    if device == "cuda":
+        # Train on a single GPU to be fast and safe
+        res = faiss.StandardGpuResources()
+        gpu_train_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
+        gpu_train_index.train(train_sample)
+        # Pull trained index back to CPU
+        cpu_index = faiss.index_gpu_to_cpu(gpu_train_index)
+        del gpu_train_index
+        del res
+        torch.cuda.empty_cache()
+    else:
+        cpu_index.train(train_sample)
+        
+    del train_sample
+    print(f"Training completed in {time.time()-t0:.1f}s.")
+    
+    # ---------------------------------------------------------
+    # STEP 3: ADD VECTORS ON CPU (Prevents GPU OOM / Leaks)
+    # ---------------------------------------------------------
+    print("Populating Index with 10.3M vectors (in CPU RAM)...")
+    # This will take ~15.8 GB of CPU RAM, perfectly safe on Kaggle
+    t0 = time.time()
+    chunk_size = 1_000_000
+    for i in range(0, total_corpus_rows, chunk_size):
+        end_idx = min(i + chunk_size, total_corpus_rows)
+        fp32_chunk = memmap_array[i:end_idx].astype(np.float32)
+        cpu_index.add(fp32_chunk)
+        print(f"  Added {end_idx}/{total_corpus_rows} vectors.")
+        
+    print(f"Index populated in {time.time()-t0:.1f}s.")
+    
+    # Free up Memmap RAM
+    del memmap_array
+    gc.collect()
+
+    # ---------------------------------------------------------
+    # STEP 4: MOVE TO GPUS AND SEARCH
+    # ---------------------------------------------------------
+    if device == "cuda":
+        print("Transferring populated index to all GPUs (Sharded & FP16)...")
+        co = faiss.GpuMultipleClonerOptions()
+        co.shard = True
+        co.useFloat16 = True
+        search_index = faiss.index_cpu_to_all_gpus(cpu_index, co=co)
+    else:
+        search_index = cpu_index
+        
+    # Set nprobe
+    ps = faiss.GpuParameterSpace()
+    ps.set_index_parameter(search_index, "nprobe", 32)
+    
     print(f"Searching Top-{args.top_k} candidates across {total_corpus_rows} corpus...")
     t0 = time.time()
-    
-    # FAISS search
-    scores, indices = index.search(query_np, args.top_k)
+    scores, indices = search_index.search(query_np, args.top_k)
     print(f"Search completed in {time.time()-t0:.1f}s.")
     
-    # 6. Format Output
+    # ---------------------------------------------------------
+    # STEP 5: FORMAT OUTPUT
+    # ---------------------------------------------------------
     print("Formatting candidates...")
     
-    # mapping_df has faiss_row_id (index), entity_id, source
-    # We convert mapping_df to fast numpy arrays for lookup
     mapping_entity_ids = mapping_df["entity_id"].to_numpy()
     mapping_sources = mapping_df["source"].to_numpy()
     
-    # Flatten outputs
     num_queries = len(query_ids)
-    
-    # Repeat query_ids for K results
     flat_query_ids = np.repeat(query_ids, args.top_k)
     flat_ranks = np.tile(np.arange(1, args.top_k + 1), num_queries)
     
     flat_indices = indices.flatten()
     flat_scores = scores.flatten()
     
-    # Lookup entity_id and source using the indices
     flat_candidate_ids = mapping_entity_ids[flat_indices]
     flat_candidate_sources = mapping_sources[flat_indices]
     
