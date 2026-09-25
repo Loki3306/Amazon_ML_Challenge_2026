@@ -90,21 +90,48 @@ def main():
             
             t_chunk = time.perf_counter()
             
-            # Compute features
-            if args.workers == 1:
-                feat_df = generate_features(chunk, s1_df, cand_df)
-            else:
-                raise ValueError("Inference script currently only supports workers=1 for memory safety.")
+            # Format retrieval_source
+            # Exact = 1.0, Dense = 0.0
+            if "retrieval_method" in chunk.columns:
+                ret_src = 1.0 if source_name == "exact" else 0.0
+                chunk = chunk.with_columns(pl.lit(ret_src).alias("retrieval_source"))
+            
+            # Missing columns fill (Exact might not have dense_score)
+            if "dense_score" not in chunk.columns:
+                chunk = chunk.with_columns(pl.lit(1.0).alias("dense_score"), pl.lit(1.0).alias("dense_rank"))
+                
+            # Perform Joins
+            chunk = chunk.join(
+                s1_df.select(["entity_id", "name_norm", "address_norm", "country_norm"])
+                     .rename({"entity_id": "query_id",
+                              "name_norm": "s1_name",
+                              "address_norm": "s1_addr",
+                              "country_norm": "s1_country"}),
+                on="query_id", how="left"
+            )
+            chunk = chunk.join(
+                cand_df.select(["entity_id", "name_norm", "address_norm", "country_norm"])
+                       .rename({"entity_id": "candidate_id",
+                                "name_norm": "cand_name",
+                                "address_norm": "cand_addr",
+                                "country_norm": "cand_country"}),
+                on="candidate_id", how="left"
+            )
+            for col in ["s1_name", "s1_addr", "s1_country", "cand_name", "cand_addr", "cand_country"]:
+                chunk = chunk.with_columns(pl.col(col).fill_null(""))
                 
             # Keep track of IDs
-            query_ids = feat_df["query_id"].to_list()
-            cand_ids = feat_df["candidate_id"].to_list()
+            query_ids = chunk["query_id"].to_list()
+            cand_ids = chunk["candidate_id"].to_list()
             
-            # Extract features for LightGBM
-            X = feat_df.select(feature_names).to_numpy()
+            # Compute features
+            feat_dict = feat_gen.compute_features_for_chunk(chunk, workers=args.workers)
             
-            # Free feat_df
-            del feat_df
+            # Extract features for LightGBM exactly in feature_names order
+            X = np.column_stack([feat_dict[name] for name in feature_names])
+            
+            # Free memory
+            del feat_dict
             del chunk
             gc.collect()
             
