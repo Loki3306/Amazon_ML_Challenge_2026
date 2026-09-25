@@ -34,7 +34,7 @@ def get_topk_fn(top_k: int):
             from sparse_dot_topn import awesome_cossim_topn
             print(f"  [sparse_dot_topn legacy] Using C++ extension")
             def fn(A, B_T):
-                return awesome_cossim_topn(A, B_T, ntop=top_k, lower_bound=0.0, use_threads=True, n_jobs=-1)
+                return awesome_cossim_topn(A, B_T, ntop=top_k, lower_bound=0.0, use_threads=True, n_jobs=4)
             return fn, True
         except ImportError:
             print(f"  [scipy fallback] sparse_dot_topn not found, using chunked scipy (slower)")
@@ -53,7 +53,7 @@ def parse_args():
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--chunk-size", type=int, default=50000)
     # BM25 approximation: sublinear_tf + max_df is a strong BM25 approximation
-    parser.add_argument("--max-df", type=float, default=0.01, help="Drop terms in >X% of docs (removes stopwords)")
+    parser.add_argument("--max-df", type=float, default=0.001, help="Drop terms in >X% of docs (removes stopwords)")
     parser.add_argument("--min-df", type=int, default=2)
     return parser.parse_args()
 
