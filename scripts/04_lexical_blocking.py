@@ -131,6 +131,23 @@ def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k, batc
     
     n_queries = len(s1_names)
     
+    import contextlib
+    import joblib
+    from tqdm.auto import tqdm
+
+    @contextlib.contextmanager
+    def tqdm_joblib(tqdm_object):
+        class TqdmBatchCompletionCallback(joblib.parallel.BatchCompletionCallBack):
+            def __call__(self, *args, **kwargs):
+                tqdm_object.update(n=self.batch_size)
+                return super().__call__(*args, **kwargs)
+        old_batch_callback = joblib.parallel.BatchCompletionCallBack
+        joblib.parallel.BatchCompletionCallBack = TqdmBatchCompletionCallback
+        try:
+            yield tqdm_object
+        finally:
+            joblib.parallel.BatchCompletionCallBack = old_batch_callback
+
     print(f"[{split}] Processing {n_queries} queries in parallel across all CPU cores...")
     
     # Create batch arguments
@@ -143,13 +160,14 @@ def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k, batc
             s1_ids[start_idx:end_idx]
         ))
         
-    # Run in parallel to maximize CPU cores
-    results = Parallel(n_jobs=-1, verbose=10)(
-        delayed(process_batch)(
-            b[0], b[1], b[2], b[3], 
-            vectorizer, tfidf, corpus_tfidf_T, top_k
-        ) for b in batches
-    )
+    # Run in parallel to maximize CPU cores with a progress bar!
+    with tqdm_joblib(tqdm(desc="Batches", total=len(batches))):
+        results = Parallel(n_jobs=-1)(
+            delayed(process_batch)(
+                b[0], b[1], b[2], b[3], 
+                vectorizer, tfidf, corpus_tfidf_T, top_k
+            ) for b in batches
+        )
     
     print(f"[{split}] Aggregating results...")
     out_query_ids = []
