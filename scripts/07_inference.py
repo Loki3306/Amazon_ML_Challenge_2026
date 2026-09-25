@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument("--data-dir", type=str, default="data/processed")
     parser.add_argument("--candidates-dir", type=str, default="data/candidates")
     parser.add_argument("--model-path", type=str, default="models/lightgbm/model_6a.txt")
-    parser.add_argument("--output-csv", type=str, default="submission.csv")
+    parser.add_argument("--output-csv", type=str, default="submission.tsv")
     parser.add_argument("--threshold", type=float, default=0.95, help="F0.5 optimized threshold")
     parser.add_argument("--chunk-size", type=int, default=2_000_000)
     parser.add_argument("--workers", type=int, default=1)
@@ -194,7 +194,7 @@ def main():
         submission_rows.append({"source1_id": q_id, "predicted_match_ids": cands_str})
         
     sub_df = pl.DataFrame(submission_rows)
-    sub_df.write_csv(args.output_csv)
+    sub_df.write_csv(args.output_csv, separator="\t")
     print(f"Saved submission to {args.output_csv} with {sub_df.height} rows.")
     print("Done!")
 
