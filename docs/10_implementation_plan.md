@@ -1,71 +1,88 @@
-# Implementation and Experimentation Plan
+# Comprehensive Implementation Plan & Checklist
 
-This document outlines the strict execution phases for implementing the Hybrid Retrieval + LightGBM architecture. 
+The project is broken down into 11 strictly gated phases. We will not proceed to a subsequent phase until the current phase's "Pass/Fail Gate" is met.
 
-**Core Rule**: We must not implement the full system (especially LightGBM) until the candidate generation layer (hybrid retrieval) has been empirically validated to achieve sufficient candidate recall on the actual Kaggle dataset.
+## [ ] Phase 1: Dataset Understanding
+*Objective: Understand the empirical structure of S1, S2, S3 and the actual difficulty of matching them without assumptions.*
+- [ ] 1.1 Load metadata via PyArrow/Polars (row count, dtype, null %, unique %, etc.)
+- [ ] 1.2 Ground-truth cardinality analysis (singleton rate, one-match, multi-match)
+- [ ] 1.3 Noise analysis (empirical examples of abbreviations, typos, missing data)
+- [ ] 1.4 Collision analysis (most common normalized names/addresses)
+- [ ] 1.5 Generate `dataset_profile.json` and `dataset_profile.html`
+**Gate A (Dataset)**: Do we empirically understand the entity volume, singleton rate, and skew?
 
-## Phase 1: Retrieval Audit & Candidate Generation Baseline (CURRENT GOAL)
-Before modeling, we must understand the upper-bound of our recall and the size of the search space.
+## [ ] Phase 2: Data Foundation & Normalization (Phase 2 & 3)
+*Objective: Establish a deterministic data pipeline from raw TSVs to canonical Parquet files.*
+- [ ] Create `src/preprocessing/` (`normalize_name.py`, `normalize_address.py`)
+- [ ] Implement deterministic normalization (Unicode, lowercase, punctuation, whitespace, suffixes)
+- [ ] Write unit tests for all normalization functions
+- [ ] Convert normalized outputs to `processed/train_s1.parquet`, etc.
+**Gate**: Are all TSVs transformed into clean, queryable Parquet files with both raw and normalized fields?
 
-1. **Dataset Profiling & Schema Verification**
-   - Load S1, S2, and S3.
-   - Inspect row counts, analyze missingness, and determine true match cardinality from `train_ground_truth.tsv`.
-2. **Text Normalization**
-   - Implement basic deterministic normalization (lowercase, punctuation stripping, whitespace normalization).
-3. **Lexical Retrieval (BM25)**
-   - Build a BM25 index over the S2+S3 corpus.
-4. **Dense Retrieval (Baseline ANN)**
-   - Extract a basic baseline dense embedding (e.g., using a small sentence-transformer model that complies with <8B parameter and open-source constraints).
-   - Build a FAISS index (Exact or HNSW) for the S2+S3 corpus.
-5. **Retrieval Grid Search (The Mandatory Experiment)**
-   We will compute the following matrix to determine if hybrid retrieval is actually justified:
-   
-   | Retriever | K | Candidate Recall | Avg Cand/S1 | P95 Cand/S1 | Runtime | Memory |
-   | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-   | Exact | - | | | | | |
-   | BM25 | 20 | | | | | |
-   | BM25 | 50 | | | | | |
-   | BM25 | 100 | | | | | |
-   | Dense | 20 | | | | | |
-   | Dense | 50 | | | | | |
-   | Dense | 100 | | | | | |
-   | Hybrid (BM25+Dense) | 20+20 | | | | | |
-   | Hybrid (BM25+Dense) | 50+50 | | | | | |
-   | Hybrid (BM25+Dense) | 100+100 | | | | | |
+## [ ] Phase 3: Exact / Cheap Retrieval (Phase 4)
+*Objective: Build dictionary/index lookups for computationally free candidate generation.*
+- [ ] Exact normalized name lookup
+- [ ] Exact normalized address lookup
+- [ ] Exact rare token / numeric token lookup
+**Gate**: Can we add high-confidence candidates for a fraction of the queries instantly?
 
-6. **Output**: Establish the optimal $K_{bm25}$ and $K_{dense}$ configuration that maximizes Candidate Recall without causing candidate explosion.
+## [ ] Phase 4: Lexical Retrieval (BM25 / n-gram) (Phase 5)
+*Objective: High-recall string and token-level retrieval.*
+- [ ] Build offline BM25 index over `S2 $\cup$ S3` corpus
+- [ ] Evaluate separate indexes (name only, name+address, name+address+country)
+- [ ] Test character n-gram indexes (3-gram, 4-gram)
+- [ ] Produce `lexical_candidates.parquet`
+**Gate**: Measure `Recall@K` - is the lexical recall sufficient?
 
-## Phase 2: Feature Engineering
-Once a solid `candidate_pairs.tsv` is generated using the chosen $K$ parameters:
-1. Construct the pairwise feature vectors.
-2. Calculate lexical overlaps (Jaro-Winkler, Levenshtein, Jaccard).
-3. Inject retrieval metadata (BM25 Rank, Dense Cosine, RRF).
-4. Inject structural features (length ratios, numeric overlap).
+## [ ] Phase 5: Dense ANN Retrieval (Phase 6)
+*Objective: Semantic/noisy recall using embeddings.*
+- [ ] Encode S2/S3 corpus using a frozen, <8B parameter pretrained encoder
+- [ ] Build FAISS index (start with Exact/HNSW)
+- [ ] Query index with S1 embeddings
+**Gate**: Measure Dense `Recall@K`. Does it find true matches that BM25 missed?
 
-## Phase 3: Matcher Ablation & LightGBM Training
-Using the *fixed* candidate set from Phase 1, we will run controlled ablations to isolate LightGBM's value:
-- **M0**: Simple weighted score baseline
-- **M1**: Logistic Regression
-- **M2**: LightGBM
-- **M3**: XGBoost
+## [ ] Phase 6: Hybrid Candidate Generation (Phase 7 & 8)
+*Objective: Merge retrieval paths into a high-recall, bounded-volume candidate set.*
+- [ ] Union Exact, Lexical, and Dense candidates (deduplicated)
+- [ ] Retain retrieval metadata (`bm25_rank`, `dense_score`, etc.)
+- [ ] Intersect with ground truth to calculate absolute Blocking Recall
+- [ ] Export `artifacts/blocking_failures.parquet` for analysis
+- [ ] Finalize `candidate_pairs.tsv`
+**Gate B & C (Retrieval & Efficiency)**: Have we maximized candidate recall while keeping total candidate volume computationally manageable?
 
-We will also conduct **Feature Ablations**:
-- **F0**: Name/address fuzzy only
-- **F1**: + BM25 features
-- **F2**: + Dense similarity features
-- **F3**: + Retrieval rank features
-- **F4**: + Retrieval agreement
-- **F5**: + Structural features
+## [ ] Phase 7: Pair Feature Engine (Phase 9)
+*Objective: Compute granular features for every candidate pair.*
+- [ ] Generate Name features (Jaro-Winkler, Jaccard, overlaps)
+- [ ] Generate Address features (numeric overlap, postal-code match)
+- [ ] Incorporate Retrieval features (BM25/Dense ranks and scores)
+- [ ] Vectorize operations (avoid Python `for` loops over millions of pairs)
+**Gate**: Are feature matrices correctly computed without out-of-memory errors?
 
-*Crucial Training Detail*: We must use the retrieval-generated false positives as hard negatives for training the LightGBM classifier.
+## [ ] Phase 8: LightGBM Matcher (Phase 10)
+*Objective: Train a pairwise classifier on the candidate set.*
+- [ ] Implement strict S1-entity-based training/validation splits (no leakage)
+- [ ] Sample hard negatives (retrieved but incorrect candidates)
+- [ ] Train LightGBM classifier to output `P(match)`
+**Gate D (Matcher)**: Can the model cleanly separate true candidates from retrieval-generated false positives?
 
-## Phase 4: Decision Policy Optimization
-1. Analyze the raw LightGBM probability outputs.
-2. Implement calibration logic to map scores to zero, one, or multiple matches (singleton handling).
-3. Validate against the F0.5 Macro-Average metric.
+## [ ] Phase 9: Calibration & Zero/One/Many Decision (Phase 11 & 12)
+*Objective: Convert raw pair probabilities into final entity-set decisions.*
+- [ ] Calibrate LightGBM probabilities (Platt scaling / Isotonic regression)
+- [ ] Implement dynamic thresholding policy
+- [ ] Correctly handle empty match sets (Singletons)
+**Gate E (Decision)**: Does the system achieve high macro $F_{0.5}$ without falsely merging singletons?
 
-## Phase 5: Advanced (Optional) Additions
-Only if required to squeeze extra F0.5 performance (and only after Phase 1-4 are fully functioning):
-- Cross-encoder reranking
-- Country-aware index partitioning (if country proves 100% reliable)
-- Entity-resolution specific fine-tuning of the embedding model via contrastive learning.
+## [ ] Phase 10: Scale & Optimize (Phase 14-20)
+*Objective: Ensure the pipeline scales to millions of test rows.*
+- [ ] Implement batching for S1 queries (retrieval + feature + inference)
+- [ ] Checkpoint system state (save indexes, models, and intermediate predictions)
+- [ ] Add observability logging (rows/sec, RAM peak, retrieval failure rate)
+**Gate**: Does the pipeline run end-to-end within memory and time constraints on Kaggle?
+
+## [ ] Phase 11: Final Validation & Submission (Phase 21)
+*Objective: Execute on the unseen Test data and package.*
+- [ ] Freeze all preprocessing, indexes, models, and thresholds
+- [ ] Run blind on `test_source1.tsv` mapping to `test_source2.tsv`/`test_source3.tsv`
+- [ ] Validate outputs against competition rules (no S1 duplicates, IDs exist, etc.)
+- [ ] Zip `matching_results.tsv`, `candidate_pairs.tsv`, code, and documentation
+**Final Gate**: Successful run of `validate_submission.py`.
