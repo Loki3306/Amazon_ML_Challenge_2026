@@ -48,7 +48,7 @@ def main():
     
     # We use IVFFlat to reduce 22 trillion calculations to a tiny fraction
     d = 384
-    nlist = 65536  # Number of Voronoi cells (clusters)
+    nlist = 16384  # 16k clusters is much faster to train on GPU than 65k
     quantizer = faiss.IndexFlatIP(d)
     cpu_index = faiss.IndexIVFFlat(quantizer, d, nlist, faiss.METRIC_INNER_PRODUCT)
     
@@ -63,9 +63,9 @@ def main():
         index = cpu_index
         print("WARNING: CUDA not detected, running on CPU.")
 
-    print("Training IVFFlat on 2,000,000 samples...")
-    # Train on first 2M rows (sufficient for 10M dataset)
-    train_sample = memmap_array[:2_000_000].astype(np.float32)
+    print(f"Training IVFFlat on 1,000,000 samples for {nlist} clusters...")
+    # Train on first 1M rows (perfect for 16k centroids)
+    train_sample = memmap_array[:1_000_000].astype(np.float32)
     index.train(train_sample)
     del train_sample
     print(f"Training completed in {time.time()-t0:.1f}s.")
@@ -81,11 +81,11 @@ def main():
         
     print(f"Index populated in {time.time()-t0:.1f}s.")
     
-    # Set nprobe (number of clusters to search). 64 out of 65536 = ~0.1% of the corpus searched per query
+    # Set nprobe (number of clusters to search). 32 out of 16384 = ~0.2% of the corpus searched per query
     # faiss.GpuIndexIVF has a setNumProbes method in Python (via SWIG) or we can set nprobe on CPU index and clone again, 
     # but the easiest way to set nprobe on a sharded GPU index is through GpuParameterSpace.
     ps = faiss.GpuParameterSpace()
-    ps.set_index_parameter(index, "nprobe", 64)
+    ps.set_index_parameter(index, "nprobe", 32)
     
     # Free up RAM (we don't need memmap anymore)
     del memmap_array
