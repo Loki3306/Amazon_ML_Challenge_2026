@@ -1,4 +1,7 @@
 /data/
+/artifacts/
+/reports/
+/student_resource/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/

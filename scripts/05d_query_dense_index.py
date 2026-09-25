@@ -31,7 +31,8 @@ def main():
     
     print("==================================================")
     print(f" PHASE 5D: DENSE QUERY RETRIEVAL ({args.split.upper()})")
-    print(f" Top-K: {args.top_k}")
+    print(f" Top-K:  {args.top_k}")
+    print(f" nprobe: {args.nprobe}")
     print("==================================================")
     
     emb_path = os.path.join(args.index_dir, "corpus_embeddings_fp16.npy")
