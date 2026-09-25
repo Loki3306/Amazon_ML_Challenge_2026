@@ -217,7 +217,7 @@ def main():
     vectorizer = TfidfVectorizer(
         analyzer="char_wb",
         ngram_range=(args.ngram_min, args.ngram_max),
-        max_df=0.95,
+        max_df=0.01,
         min_df=2,
         dtype=np.float32,
         sublinear_tf=True

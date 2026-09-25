@@ -53,7 +53,7 @@ def parse_args():
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--chunk-size", type=int, default=50000)
     # BM25 approximation: sublinear_tf + max_df is a strong BM25 approximation
-    parser.add_argument("--max-df", type=float, default=0.3, help="Drop terms in >X% of docs (removes stopwords)")
+    parser.add_argument("--max-df", type=float, default=0.01, help="Drop terms in >X% of docs (removes stopwords)")
     parser.add_argument("--min-df", type=int, default=2)
     return parser.parse_args()
 
