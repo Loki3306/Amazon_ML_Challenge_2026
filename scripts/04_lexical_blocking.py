@@ -43,15 +43,20 @@ def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k):
     del s2_df, s3_df, corpus_df
     gc.collect()
     
-    print(f"[{split}] Tokenizing Corpus (10.3M rows) with bm25s...")
-    # bm25s uses highly optimized tokenization
-    corpus_tokens = bm25s.tokenize(corpus_names)
+    # Critical performance fix: drop high-frequency business stopwords that bloat the sparse matrices 
+    # and cause the Top-K algorithm to evaluate millions of dense comparisons for a single query.
+    custom_stopwords = [
+        "inc", "llc", "ltd", "corp", "corporation", "co", "company", "the", "and", "of", 
+        "a", "an", "for", "to", "in", "group", "holdings", "technologies", "services", "global"
+    ]
     
-    print(f"[{split}] Building BM25 Index (this is ultra-fast)...")
+    print(f"[{split}] Tokenizing Corpus (10.3M rows) and removing highly frequent stopwords...")
+    corpus_tokens = bm25s.tokenize(corpus_names, stopwords=custom_stopwords)
+    
+    print(f"[{split}] Building BM25 Index...")
     retriever = bm25s.BM25()
     retriever.index(corpus_tokens)
     
-    # Free memory
     del corpus_names, corpus_tokens
     gc.collect()
     
@@ -64,13 +69,14 @@ def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k):
     
     n_queries = len(s1_names)
     print(f"[{split}] Tokenizing {n_queries} queries...")
-    query_tokens = bm25s.tokenize(s1_names)
+    query_tokens = bm25s.tokenize(s1_names, stopwords=custom_stopwords)
     del s1_names
     gc.collect()
     
-    print(f"[{split}] Retrieving Top-{top_k} Candidates for all queries instantly...")
-    # bm25s computes this natively using Numba sparse matrices, entirely bypassing the GIL
-    results, scores = retriever.retrieve(query_tokens, k=top_k)
+    print(f"[{split}] Retrieving Top-{top_k} Candidates...")
+    # By dropping stopwords, the matrix is massively sparser. This should run 100x faster.
+    # We also explicitly specify n_threads and numba backend.
+    results, scores = retriever.retrieve(query_tokens, k=top_k, backend="numba", n_threads=-1)
     
     del query_tokens
     gc.collect()
@@ -80,7 +86,6 @@ def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k):
     out_candidate_ids = []
     out_candidate_sources = []
     
-    # results is an array of shape (n_queries, top_k) containing the index in the corpus
     for i in range(n_queries):
         q_id = s1_ids[i]
         for rank in range(top_k):
