@@ -470,9 +470,8 @@ def main():
             sc_r, ind_r, st_r = search_ivfflat_index(idx_r, q_emb_r, effective_nlist=eff_nlist_r, nprobe=target_nprobe_5, top_k=args.top_k)
 
             k_key = f"K={args.top_k}"
-            k_list_for_rep = [1, 5, 10, 25, args.top_k]
-            # Clamp k_list values to top_k
-            k_list_for_rep = sorted(set(min(k, args.top_k) for k in k_list_for_rep))
+            # Only include K values that are <= top_k; deduplicate and sort
+            k_list_for_rep = sorted(set(k for k in [1, 5, 10, 25, args.top_k] if k <= args.top_k))
             eval_r = evaluate_retrieval(s1_ids, corpus_ids, {rep: ind_r}, exact_dict, gt_dict, k_list=k_list_for_rep)
 
             recall_at_k = {}
@@ -499,8 +498,13 @@ def main():
                 "avg_candidates_per_s1": avg_cands,
                 "search_runtime_sec": round(st_r, 3)
             }
-            print(f"  [{rep:30s}] Dense Pair: {pair_recall_50:6.2f}% | Hybrid Pair: {h_pair_recall_50:6.2f}% | Query: {query_recall_50:6.2f}% | Time: {st_r:.3f}s")
-            print(f"    Recall@1={recall_at_k['recall_at_1']:.2f}% Recall@5={recall_at_k['recall_at_5']:.2f}% Recall@10={recall_at_k['recall_at_10']:.2f}% Recall@25={recall_at_k['recall_at_25']:.2f}% Recall@50={recall_at_k.get('recall_at_50', pair_recall_50):.2f}%")
+            # Build safe recall string for available K values only
+            recall_str = "  ".join(f"Recall@{k}={recall_at_k[f'recall_at_{k}']:.2f}%" for k in k_list_for_rep)
+            dense_str = f"{pair_recall_50:.2f}" if pair_recall_50 is not None else "N/A"
+            hybrid_str = f"{h_pair_recall_50:.2f}" if h_pair_recall_50 is not None else "N/A"
+            query_str = f"{query_recall_50:.2f}" if query_recall_50 is not None else "N/A"
+            print(f"  [{rep:30s}] Dense Pair: {dense_str}% | Hybrid Pair: {hybrid_str}% | Query: {query_str}% | Time: {st_r:.3f}s")
+            print(f"    {recall_str}")
 
             del q_emb_r, c_emb_r, idx_r, sc_r, ind_r
             if device == "cuda":
