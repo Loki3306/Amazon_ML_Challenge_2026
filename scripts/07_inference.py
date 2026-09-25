@@ -8,10 +8,18 @@ import lightgbm as lgb
 from multiprocessing import Pool
 import sys
 
-# Ensure imports work when run as script
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "code", "business_entity_resolution", "src")))
-from data_utils import load_entity_tables
-from feature_engineering import generate_features
+import importlib.util
+
+# Dynamically import 06a_features_lightgbm since its name starts with a number
+script_dir = os.path.dirname(os.path.abspath(__file__))
+feat_script_path = os.path.join(script_dir, "06a_features_lightgbm.py")
+spec = importlib.util.spec_from_file_location("feat_gen", feat_script_path)
+feat_gen = importlib.util.module_from_spec(spec)
+sys.modules["feat_gen"] = feat_gen
+spec.loader.exec_module(feat_gen)
+
+load_entity_tables = feat_gen.load_entity_tables
+generate_features = feat_gen.generate_features
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Phase 7: Inference & Submission")
