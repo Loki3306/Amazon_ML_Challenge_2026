@@ -144,7 +144,7 @@ def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k, batc
         ))
         
     # Run in parallel to maximize CPU cores
-    results = Parallel(n_jobs=-1, backend="threading", verbose=10)(
+    results = Parallel(n_jobs=-1, verbose=10)(
         delayed(process_batch)(
             b[0], b[1], b[2], b[3], 
             vectorizer, tfidf, corpus_tfidf_T, top_k
