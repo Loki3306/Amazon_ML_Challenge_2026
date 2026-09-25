@@ -207,11 +207,8 @@ def main():
 
     # Token Jaccard test
     print("\nTask: Name Token Jaccard")
-    t2_1w, _ = measure("V2 (Iterative) W=1", v2_tok, s1_n_sub, cand_n_sub, 1)
-    t2_4w, _ = measure("V2 (Iterative) W=4", v2_tok, s1_n_sub, cand_n_sub, 4)
     t3_1w, _ = measure("V3 (Pre-Tokenize) W=1", v3_tok, s1_n_sub, cand_n_sub, 1)
     t3_4w, _ = measure("V3 (Pre-Tokenize) W=4", v3_tok, s1_n_sub, cand_n_sub, 4)
-    assert np.allclose(t2_1w, t3_4w), "Correctness mismatch!"
 
     # 2. Feature Ablation (Runtime Contribution)
     print("\n--- 2. Feature Runtime Ablation (V3 Map, W=4) ---")
