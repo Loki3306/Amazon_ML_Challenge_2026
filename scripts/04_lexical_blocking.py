@@ -75,8 +75,7 @@ def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k):
     
     print(f"[{split}] Retrieving Top-{top_k} Candidates...")
     # By dropping stopwords, the matrix is massively sparser. This should run 100x faster.
-    # We also explicitly specify n_threads and numba backend.
-    results, scores = retriever.retrieve(query_tokens, k=top_k, backend="numba", n_threads=-1)
+    results, scores = retriever.retrieve(query_tokens, k=top_k)
     
     del query_tokens
     gc.collect()
