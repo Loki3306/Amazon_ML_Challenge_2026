@@ -6,12 +6,14 @@ from datetime import datetime
 import json
 import gc
 import sys
-import bm25s
+import numpy as np
+
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "code", "business_entity_resolution", "src")))
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Phase 4: Lexical Blocking (BM25s)")
+    parser = argparse.ArgumentParser(description="Phase 4: Lexical Blocking (sparse_dot_topn)")
     parser.add_argument("--data-dir", type=str, default="data/processed", help="Canonical Parquet directory")
     parser.add_argument("--split", type=str, default="train", help="Which split to run")
     parser.add_argument("--output-dir", type=str, default="data/candidates", help="Output directory")
@@ -19,8 +21,25 @@ def parse_args():
     parser.add_argument("--top-k", type=int, default=5, help="Number of lexical candidates to retrieve")
     return parser.parse_args()
 
+def get_fast_dot_function():
+    try:
+        from sparse_dot_topn import sp_matmul_topn
+        def fast_dot(A, B, ntop):
+            return sp_matmul_topn(A, B, top_n=ntop, n_threads=-1)
+        return fast_dot
+    except ImportError:
+        try:
+            from sparse_dot_topn import awesome_cossim_topn
+            def fast_dot(A, B, ntop):
+                return awesome_cossim_topn(A, B, ntop=ntop, lower_bound=0.0, use_threads=True, n_jobs=-1)
+            return fast_dot
+        except ImportError:
+            raise ImportError("Please install sparse_dot_topn: pip install sparse_dot_topn")
+
 def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k):
     start_time = time.time()
+    
+    fast_dot = get_fast_dot_function()
     
     s1_path = os.path.join(data_dir, split, f"{split}_source1.parquet")
     s2_path = os.path.join(data_dir, split, f"{split}_source2.parquet")
@@ -43,21 +62,18 @@ def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k):
     del s2_df, s3_df, corpus_df
     gc.collect()
     
-    # Critical performance fix: drop high-frequency business stopwords that bloat the sparse matrices 
-    # and cause the Top-K algorithm to evaluate millions of dense comparisons for a single query.
-    custom_stopwords = [
-        "inc", "llc", "ltd", "corp", "corporation", "co", "company", "the", "and", "of", 
-        "a", "an", "for", "to", "in", "group", "holdings", "technologies", "services", "global"
-    ]
+    print(f"[{split}] Fitting TfidfVectorizer (max_df=0.01) to auto-drop zipfian stopwords...")
+    # max_df=0.01 absolutely DESTROYS the zipfian bottleneck by mathematically removing 
+    # any token appearing in >1% of documents (inc, llc, etc).
+    # min_df=2 drops unique misspellings to save massive amounts of RAM.
+    vectorizer = TfidfVectorizer(analyzer="word", ngram_range=(1, 2), max_df=0.01, min_df=2, dtype=np.float32)
     
-    print(f"[{split}] Tokenizing Corpus (10.3M rows) and removing highly frequent stopwords...")
-    corpus_tokens = bm25s.tokenize(corpus_names, stopwords=custom_stopwords)
+    corpus_tfidf = vectorizer.fit_transform(corpus_names)
+    del corpus_names
+    gc.collect()
     
-    print(f"[{split}] Building BM25 Index...")
-    retriever = bm25s.BM25()
-    retriever.index(corpus_tokens)
-    
-    del corpus_names, corpus_tokens
+    corpus_tfidf_T = corpus_tfidf.T.tocsr()
+    del corpus_tfidf
     gc.collect()
     
     print(f"[{split}] Loading Queries (S1)...")
@@ -68,27 +84,37 @@ def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k):
     gc.collect()
     
     n_queries = len(s1_names)
-    print(f"[{split}] Tokenizing {n_queries} queries...")
-    query_tokens = bm25s.tokenize(s1_names, stopwords=custom_stopwords)
+    print(f"[{split}] Transform {n_queries} queries...")
+    query_tfidf = vectorizer.transform(s1_names).tocsr()
     del s1_names
     gc.collect()
     
-    print(f"[{split}] Retrieving Top-{top_k} Candidates...")
-    # By dropping stopwords, the matrix is massively sparser. This should run 100x faster.
-    results, scores = retriever.retrieve(query_tokens, k=top_k)
+    print(f"[{split}] Computing C++ Multi-Threaded Sparse Dot Top-K...")
+    # This C++ function computes cosine similarity and keeps ONLY top-K per row instantly in C++ memory
+    matches = fast_dot(query_tfidf, corpus_tfidf_T, top_k)
     
-    del query_tokens
+    del query_tfidf, corpus_tfidf_T
     gc.collect()
     
     print(f"[{split}] Mapping results back to entity IDs...")
+    # matches is a CSR matrix of shape (n_queries, n_corpus)
     out_query_ids = []
     out_candidate_ids = []
     out_candidate_sources = []
     
-    for i in range(n_queries):
-        q_id = s1_ids[i]
-        for rank in range(top_k):
-            c_idx = results[i, rank]
+    # Fast extraction from CSR
+    indptr = matches.indptr
+    indices = matches.indices
+    
+    for q_idx in range(n_queries):
+        start = indptr[q_idx]
+        end = indptr[q_idx+1]
+        
+        q_id = s1_ids[q_idx]
+        
+        # Get top-k indices for this query
+        for idx in range(start, end):
+            c_idx = indices[idx]
             out_query_ids.append(q_id)
             out_candidate_ids.append(corpus_ids[c_idx])
             out_candidate_sources.append(corpus_sources[c_idx])
@@ -123,7 +149,7 @@ def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k):
 def main():
     args = parse_args()
     print("==================================================")
-    print("PHASE 4: LEXICAL BLOCKING (BM25s STATE-OF-THE-ART)")
+    print("PHASE 4: LEXICAL BLOCKING (sparse_dot_topn)")
     print("==================================================")
     
     reports = []
