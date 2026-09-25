@@ -2,90 +2,24 @@ import os
 import time
 import argparse
 import polars as pl
-import numpy as np
-import scipy.sparse as sp
-from sklearn.feature_extraction.text import HashingVectorizer, TfidfTransformer
 from datetime import datetime
 import json
 import gc
 import sys
+import bm25s
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "code", "business_entity_resolution", "src")))
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Phase 4: Lexical Blocking (TF-IDF Top-K)")
+    parser = argparse.ArgumentParser(description="Phase 4: Lexical Blocking (BM25s)")
     parser.add_argument("--data-dir", type=str, default="data/processed", help="Canonical Parquet directory")
     parser.add_argument("--split", type=str, default="train", help="Which split to run")
     parser.add_argument("--output-dir", type=str, default="data/candidates", help="Output directory")
     parser.add_argument("--artifacts-dir", type=str, default="artifacts", help="Artifacts directory")
-    parser.add_argument("--top-k", type=int, default=5, help="Number of lexical candidates to retrieve per query")
-    parser.add_argument("--batch-size", type=int, default=50000, help="Query batch size for sparse dot product")
+    parser.add_argument("--top-k", type=int, default=5, help="Number of lexical candidates to retrieve")
     return parser.parse_args()
 
-def get_top_k_sparse(sparse_matrix, k):
-    """
-    Given a sparse matrix of scores (queries x corpus),
-    returns the top K indices and scores for each query.
-    Optimized for CSR matrices.
-    """
-    # Convert to CSR if not already, for row slicing
-    sparse_matrix = sparse_matrix.tocsr()
-    
-    n_queries = sparse_matrix.shape[0]
-    top_k_indices = np.zeros((n_queries, k), dtype=np.int32)
-    
-    for i in range(n_queries):
-        row = sparse_matrix[i]
-        if row.nnz == 0:
-            top_k_indices[i] = -1  # No candidates
-            continue
-            
-        # Get data and column indices
-        data = row.data
-        indices = row.indices
-        
-        # If fewer non-zeros than k, pad with -1
-        if len(data) <= k:
-            sorted_idx = np.argsort(-data)
-            top_k_indices[i, :len(data)] = indices[sorted_idx]
-            if len(data) < k:
-                top_k_indices[i, len(data):] = -1
-        else:
-            # argpartition to get top K efficiently, then sort just those K
-            part_idx = np.argpartition(-data, k - 1)[:k]
-            # sort the top k
-            sorted_part = part_idx[np.argsort(-data[part_idx])]
-            top_k_indices[i] = indices[sorted_part]
-            
-    return top_k_indices
-
-from joblib import Parallel, delayed
-
-def process_batch(start_idx, end_idx, batch_names, batch_ids, vectorizer, tfidf, corpus_tfidf_T, top_k):
-    # Transform queries
-    batch_hash = vectorizer.transform(batch_names)
-    batch_tfidf = tfidf.transform(batch_hash)
-    
-    # Dot product: (B, V) dot (V, C) -> (B, C)
-    scores = batch_tfidf.dot(corpus_tfidf_T)
-    
-    # Get Top K indices
-    top_k_idx = get_top_k_sparse(scores, top_k)
-    
-    out_q = []
-    out_c_idx = []
-    
-    for i in range(len(batch_ids)):
-        q_id = batch_ids[i]
-        for rank in range(top_k):
-            c_idx = top_k_idx[i, rank]
-            if c_idx != -1:
-                out_q.append(q_id)
-                out_c_idx.append(c_idx)
-                
-    return out_q, out_c_idx
-
-def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k, batch_size):
+def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k):
     start_time = time.time()
     
     s1_path = os.path.join(data_dir, split, f"{split}_source1.parquet")
@@ -109,76 +43,51 @@ def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k, batc
     del s2_df, s3_df, corpus_df
     gc.collect()
     
-    print(f"[{split}] Building Lexical Vectorizer (Hashing TF-IDF)...")
-    vectorizer = HashingVectorizer(n_features=2**21, analyzer="word", ngram_range=(1, 2), lowercase=False)
-    tfidf = TfidfTransformer()
+    print(f"[{split}] Tokenizing Corpus (10.3M rows) with bm25s...")
+    # bm25s uses highly optimized tokenization
+    corpus_tokens = bm25s.tokenize(corpus_names)
     
-    corpus_hash = vectorizer.transform(corpus_names)
-    corpus_tfidf = tfidf.fit_transform(corpus_hash)
+    print(f"[{split}] Building BM25 Index (this is ultra-fast)...")
+    retriever = bm25s.BM25()
+    retriever.index(corpus_tokens)
     
-    del corpus_names, corpus_hash
+    # Free memory
+    del corpus_names, corpus_tokens
     gc.collect()
-    
-    corpus_tfidf_T = corpus_tfidf.T.tocsr()
     
     print(f"[{split}] Loading Queries (S1)...")
     s1_df = pl.read_parquet(s1_path, columns=select_cols)
     s1_ids = s1_df["entity_id"].to_numpy()
     s1_names = s1_df["name_norm"].fill_null("").to_list()
-    
     del s1_df
     gc.collect()
     
     n_queries = len(s1_names)
+    print(f"[{split}] Tokenizing {n_queries} queries...")
+    query_tokens = bm25s.tokenize(s1_names)
+    del s1_names
+    gc.collect()
     
-    import contextlib
-    import joblib
-    from tqdm.auto import tqdm
-
-    @contextlib.contextmanager
-    def tqdm_joblib(tqdm_object):
-        class TqdmBatchCompletionCallback(joblib.parallel.BatchCompletionCallBack):
-            def __call__(self, *args, **kwargs):
-                tqdm_object.update(n=self.batch_size)
-                return super().__call__(*args, **kwargs)
-        old_batch_callback = joblib.parallel.BatchCompletionCallBack
-        joblib.parallel.BatchCompletionCallBack = TqdmBatchCompletionCallback
-        try:
-            yield tqdm_object
-        finally:
-            joblib.parallel.BatchCompletionCallBack = old_batch_callback
-
-    print(f"[{split}] Processing {n_queries} queries in parallel across all CPU cores...")
+    print(f"[{split}] Retrieving Top-{top_k} Candidates for all queries instantly...")
+    # bm25s computes this natively using Numba sparse matrices, entirely bypassing the GIL
+    results, scores = retriever.retrieve(query_tokens, k=top_k)
     
-    # Create batch arguments
-    batches = []
-    for start_idx in range(0, n_queries, batch_size):
-        end_idx = min(start_idx + batch_size, n_queries)
-        batches.append((
-            start_idx, end_idx, 
-            s1_names[start_idx:end_idx], 
-            s1_ids[start_idx:end_idx]
-        ))
-        
-    # Run in parallel to maximize CPU cores with a progress bar!
-    with tqdm_joblib(tqdm(desc="Batches", total=len(batches))):
-        results = Parallel(n_jobs=-1)(
-            delayed(process_batch)(
-                b[0], b[1], b[2], b[3], 
-                vectorizer, tfidf, corpus_tfidf_T, top_k
-            ) for b in batches
-        )
+    del query_tokens
+    gc.collect()
     
-    print(f"[{split}] Aggregating results...")
+    print(f"[{split}] Mapping results back to entity IDs...")
     out_query_ids = []
     out_candidate_ids = []
     out_candidate_sources = []
     
-    for res_q, res_c_idx in results:
-        out_query_ids.extend(res_q)
-        for idx in res_c_idx:
-            out_candidate_ids.append(corpus_ids[idx])
-            out_candidate_sources.append(corpus_sources[idx])
+    # results is an array of shape (n_queries, top_k) containing the index in the corpus
+    for i in range(n_queries):
+        q_id = s1_ids[i]
+        for rank in range(top_k):
+            c_idx = results[i, rank]
+            out_query_ids.append(q_id)
+            out_candidate_ids.append(corpus_ids[c_idx])
+            out_candidate_sources.append(corpus_sources[c_idx])
             
     print(f"[{split}] Saving candidates to Parquet...")
     candidates_df = pl.DataFrame({
@@ -210,13 +119,13 @@ def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k, batc
 def main():
     args = parse_args()
     print("==================================================")
-    print("PHASE 4: LEXICAL BLOCKING (TF-IDF TOP-K)")
+    print("PHASE 4: LEXICAL BLOCKING (BM25s STATE-OF-THE-ART)")
     print("==================================================")
     
     reports = []
     
     for split in [args.split] if args.split != "both" else ["train", "test"]:
-        stats = run_lexical_blocking(args.data_dir, split, args.output_dir, args.artifacts_dir, args.top_k, args.batch_size)
+        stats = run_lexical_blocking(args.data_dir, split, args.output_dir, args.artifacts_dir, args.top_k)
         if stats:
             reports.append(stats)
             
