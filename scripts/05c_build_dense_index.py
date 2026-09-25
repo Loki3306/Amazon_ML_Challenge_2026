@@ -11,6 +11,7 @@ from tqdm import tqdm
 def parse_args():
     parser = argparse.ArgumentParser(description="Phase 5C: Build Dense GPU Index (Resumable Memmap)")
     parser.add_argument("--data-dir", type=str, default="data/processed", help="Parquet directory")
+    parser.add_argument("--split", type=str, default="train", help="Which split to process (train or test)")
     parser.add_argument("--index-dir", type=str, default="data/dense_index", help="Output directory for index and mapping")
     parser.add_argument("--model-name", type=str, default="all-MiniLM-L6-v2", help="SentenceTransformer model")
     parser.add_argument("--chunk-size", type=int, default=100000, help="Rows per checkpointed chunk")
@@ -19,15 +20,20 @@ def parse_args():
 
 def main():
     args = parse_args()
+    
+    # Ensure index dir is split-specific if it's the default
+    if args.index_dir == "data/dense_index" and args.split == "test":
+        args.index_dir = "data/dense_index_test"
+        
     os.makedirs(args.index_dir, exist_ok=True)
     
     print("==================================================")
-    print(" PHASE 5C: CORPUS INDEXING (MEMMAP & MAPPING)")
+    print(f" PHASE 5C: CORPUS INDEXING ({args.split.upper()})")
     print("==================================================")
     
     # 1. Discover Total Corpus Size
-    s2_path = os.path.join(args.data_dir, "train", "train_source2.parquet")
-    s3_path = os.path.join(args.data_dir, "train", "train_source3.parquet")
+    s2_path = os.path.join(args.data_dir, args.split, f"{args.split}_source2.parquet")
+    s3_path = os.path.join(args.data_dir, args.split, f"{args.split}_source3.parquet")
     
     print("Scanning corpus size...")
     # Lazy scan to get total rows

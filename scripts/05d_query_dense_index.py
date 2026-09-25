@@ -11,6 +11,7 @@ import gc
 def parse_args():
     parser = argparse.ArgumentParser(description="Phase 5D: Query Dense GPU Index")
     parser.add_argument("--data-dir", type=str, default="data/processed", help="Parquet directory")
+    parser.add_argument("--split", type=str, default="train", help="Which split to process (train or test)")
     parser.add_argument("--index-dir", type=str, default="data/dense_index", help="Output directory of 5C")
     parser.add_argument("--output-dir", type=str, default="data/candidates", help="Where to save candidates")
     parser.add_argument("--model-name", type=str, default="all-MiniLM-L6-v2", help="SentenceTransformer model")
@@ -21,10 +22,15 @@ def parse_args():
 
 def main():
     args = parse_args()
+    
+    # Ensure index dir is split-specific if it's the default
+    if args.index_dir == "data/dense_index" and args.split == "test":
+        args.index_dir = "data/dense_index_test"
+        
     os.makedirs(args.output_dir, exist_ok=True)
     
     print("==================================================")
-    print(" PHASE 5D: DENSE QUERY RETRIEVAL")
+    print(f" PHASE 5D: DENSE QUERY RETRIEVAL ({args.split.upper()})")
     print(f" Top-K: {args.top_k}")
     print("==================================================")
     
@@ -41,7 +47,7 @@ def main():
     # STEP 1: ENCODE QUERIES FIRST (To avoid memory fragmentation)
     # ---------------------------------------------------------
     print("Loading S1 Queries...")
-    s1_path = os.path.join(args.data_dir, "train", "train_source1.parquet")
+    s1_path = os.path.join(args.data_dir, args.split, f"{args.split}_source1.parquet")
     select_cols = ["entity_id", "source", "name_norm", "address_norm", "country"]
     s1_df = pl.read_parquet(s1_path, columns=select_cols)
     
@@ -207,7 +213,7 @@ def main():
         "retrieval_method": ["dense"] * len(flat_query_ids)
     })
     
-    output_path = os.path.join(args.output_dir, f"train_dense_candidates_K{args.top_k}.parquet")
+    output_path = os.path.join(args.output_dir, f"{args.split}_dense_candidates_K{args.top_k}.parquet")
     candidates_df.write_parquet(output_path, compression="snappy")
     
     print(f"\nSaved {candidates_df.height} candidate pairs to {output_path}")
