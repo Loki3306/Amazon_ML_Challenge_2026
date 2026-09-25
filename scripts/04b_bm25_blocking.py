@@ -21,6 +21,26 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 import scipy.sparse as sp
 
 
+def get_topk_fn(top_k: int):
+    """Returns the fastest available top-K sparse matmul function."""
+    try:
+        from sparse_dot_topn import sp_matmul_topn
+        print(f"  [sparse_dot_topn] Using C++ extension for Top-{top_k} retrieval (fastest path)")
+        def fn(A, B_T):
+            return sp_matmul_topn(A, B_T, top_n=top_k, n_threads=-1, threshold=0.0)
+        return fn, True
+    except ImportError:
+        try:
+            from sparse_dot_topn import awesome_cossim_topn
+            print(f"  [sparse_dot_topn legacy] Using C++ extension")
+            def fn(A, B_T):
+                return awesome_cossim_topn(A, B_T, ntop=top_k, lower_bound=0.0, use_threads=True, n_jobs=-1)
+            return fn, True
+        except ImportError:
+            print(f"  [scipy fallback] sparse_dot_topn not found, using chunked scipy (slower)")
+            return None, False
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Phase 4B: BM25/Word TF-IDF Retrieval")
     parser.add_argument("--data-dir", type=str, default="data/processed")
@@ -114,8 +134,14 @@ def build_text_series(df: pl.DataFrame, fields: str) -> list[str]:
 
 def chunked_topk_sparse(query_matrix: sp.csr_matrix, corpus_matrix_T: sp.csr_matrix,
                           top_k: int, chunk_size: int):
+    topk_fn, use_fast = get_topk_fn(top_k)
     n_queries = query_matrix.shape[0]
     all_rows, all_cols, all_scores = [], [], []
+
+    if use_fast:
+        result = topk_fn(query_matrix, corpus_matrix_T)
+        cx = result.tocoo()
+        return cx.row.astype(np.int32), cx.col.astype(np.int32), cx.data.astype(np.float32)
 
     for start in range(0, n_queries, chunk_size):
         end = min(start + chunk_size, n_queries)
