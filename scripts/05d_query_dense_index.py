@@ -107,16 +107,28 @@ def main():
     print(f"Training completed in {time.time()-t0:.1f}s.")
     
     # ---------------------------------------------------------
-    # STEP 3: ADD VECTORS ON CPU (Prevents GPU OOM / Leaks)
+    # STEP 3: MOVE EMPTY TRAINED INDEX TO GPUS
     # ---------------------------------------------------------
-    print("Populating Index with 10.3M vectors (in CPU RAM)...")
-    # This will take ~15.8 GB of CPU RAM, perfectly safe on Kaggle
+    if device == "cuda":
+        print("Transferring EMPTY index to all GPUs (Sharded & FP16)...")
+        co = faiss.GpuMultipleClonerOptions()
+        co.shard = True
+        co.useFloat16 = True
+        search_index = faiss.index_cpu_to_all_gpus(cpu_index, co=co)
+    else:
+        search_index = cpu_index
+
+    # ---------------------------------------------------------
+    # STEP 4: ADD VECTORS DIRECTLY TO GPU INDEX (Prevents CPU OOM)
+    # ---------------------------------------------------------
+    print("Populating Index with 10.3M vectors directly to GPUs...")
     t0 = time.time()
     chunk_size = 1_000_000
     for i in range(0, total_corpus_rows, chunk_size):
         end_idx = min(i + chunk_size, total_corpus_rows)
         fp32_chunk = memmap_array[i:end_idx].astype(np.float32)
-        cpu_index.add(fp32_chunk)
+        # Adds directly to VRAM in FP16, perfectly distributed
+        search_index.add(fp32_chunk)
         print(f"  Added {end_idx}/{total_corpus_rows} vectors.")
         
     print(f"Index populated in {time.time()-t0:.1f}s.")
@@ -124,18 +136,6 @@ def main():
     # Free up Memmap RAM
     del memmap_array
     gc.collect()
-
-    # ---------------------------------------------------------
-    # STEP 4: MOVE TO GPUS AND SEARCH
-    # ---------------------------------------------------------
-    if device == "cuda":
-        print("Transferring populated index to all GPUs (Sharded & FP16)...")
-        co = faiss.GpuMultipleClonerOptions()
-        co.shard = True
-        co.useFloat16 = True
-        search_index = faiss.index_cpu_to_all_gpus(cpu_index, co=co)
-    else:
-        search_index = cpu_index
         
     # Set nprobe
     ps = faiss.GpuParameterSpace()
