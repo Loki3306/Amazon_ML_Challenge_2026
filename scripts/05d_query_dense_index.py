@@ -124,16 +124,10 @@ def main():
     print(f"Training completed in {time.time()-t0:.1f}s.")
     
     # ---------------------------------------------------------
-    # STEP 3: MOVE EMPTY TRAINED INDEX TO GPUS
+    # STEP 3: KEEP INDEX ON CPU (FAISS GPU OOMs on Kaggle T4)
     # ---------------------------------------------------------
-    if device == "cuda":
-        print("Transferring EMPTY index to all GPUs (Sharded & FP16)...")
-        co = faiss.GpuMultipleClonerOptions()
-        co.shard = True
-        co.useFloat16 = True
-        search_index = faiss.index_cpu_to_all_gpus(cpu_index, co=co)
-    else:
-        search_index = cpu_index
+    print("Keeping FAISS index on CPU to prevent CUDA OOM...")
+    search_index = cpu_index
 
     # ---------------------------------------------------------
     # STEP 4: ADD VECTORS DIRECTLY TO GPU INDEX (Prevents CPU OOM)
