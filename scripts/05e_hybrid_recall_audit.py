@@ -120,10 +120,22 @@ def main():
     if has_exact:
         results["Exact"] = evaluate_recall(gt_df, exact_df, "Exact Blocking")
         
+        # We must explicitly delete the eager dataframes before computing the massive 
+        # 132-million row Hybrid union to avoid OOM on Kaggle's 30GB CPU RAM.
+        del dense_df
+        del exact_df
+        import gc
+        gc.collect()
+        
         # HYBRID (Exact ∪ Dense)
         print("\nComputing Union (Exact ∪ Dense)...")
         t0 = time.time()
-        hybrid_df = pl.concat([exact_df, dense_df]).unique(subset=["query_id", "candidate_id"])
+        
+        # Use LazyFrames to stream the union and deduplication safely
+        exact_lf = pl.scan_parquet(exact_path).select(["query_id", "candidate_id"])
+        dense_lf = pl.scan_parquet(dense_path).select(["query_id", "candidate_id"])
+        
+        hybrid_df = pl.concat([exact_lf, dense_lf]).unique(subset=["query_id", "candidate_id"]).collect(streaming=True)
         print(f"Union computed in {time.time()-t0:.1f}s")
         
         results["Hybrid"] = evaluate_recall(gt_df, hybrid_df, "Hybrid (Exact ∪ Dense)")
