@@ -274,7 +274,8 @@ def search_ivfflat_index(index, query_embeddings: np.ndarray, effective_nlist: i
 
     t0 = time.time()
     num_queries = query_embeddings.shape[0]
-    batch_size = 4096
+    # Smaller search batch size (512) prevents FAISS GPU TemporaryMemoryOverflow when nprobe and top_k are large
+    batch_size = 512
     all_scores = []
     all_indices = []
 
@@ -326,6 +327,12 @@ def main():
 
     print(f"Encoding {len(c_texts_primary):,} corpus texts...", flush=True)
     c_emb_primary = model.encode(c_texts_primary, batch_size=args.batch_size, show_progress_bar=True, normalize_embeddings=True)
+
+    # Free PyTorch model to reclaim GPU VRAM for FAISS search
+    del model
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    gc.collect()
 
     nlist_val = min(1024, max(16, len(corpus_ids) // 10))
 
