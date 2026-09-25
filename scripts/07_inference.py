@@ -92,9 +92,8 @@ def main():
             
             # Format retrieval_source
             # Exact = 1.0, Dense = 0.0
-            if "retrieval_method" in chunk.columns:
-                ret_src = 1.0 if source_name == "exact" else 0.0
-                chunk = chunk.with_columns(pl.lit(ret_src).alias("retrieval_source"))
+            ret_src = 1.0 if source_name == "exact" else 0.0
+            chunk = chunk.with_columns(pl.lit(ret_src).alias("retrieval_source"))
             
             # Missing columns fill (Exact might not have dense_score)
             if "dense_score" not in chunk.columns:
