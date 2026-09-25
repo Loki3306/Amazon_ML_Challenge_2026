@@ -65,9 +65,14 @@ def main():
         ("exact", os.path.join(args.candidates_dir, "test_exact_candidates.parquet"))
     ]
     
-    predicted_matches = []
-    total_candidates_processed = 0
-    t0 = time.time()
+    # Open a temporary CSV to stream predictions and avoid RAM OOMs
+    temp_csv_path = os.path.join(args.output_csv + ".tmp")
+    
+    # Clear temp file if it exists (for a fresh run)
+    if os.path.exists(temp_csv_path):
+        os.remove(temp_csv_path)
+        
+    total_matches_found = 0
     
     for source_name, source_path in sources:
         if not os.path.exists(source_path):
@@ -91,11 +96,10 @@ def main():
             t_chunk = time.perf_counter()
             
             # Format retrieval_source
-            # Exact = 1.0, Dense = 0.0
             ret_src = 1.0 if source_name == "exact" else 0.0
             chunk = chunk.with_columns(pl.lit(ret_src).alias("retrieval_source"))
             
-            # Missing columns fill (Exact might not have dense_score)
+            # Missing columns fill
             if "dense_score" not in chunk.columns:
                 chunk = chunk.with_columns(pl.lit(1.0).alias("dense_score"), pl.lit(1.0).alias("dense_rank"))
                 
@@ -126,7 +130,7 @@ def main():
             # Compute features
             feat_dict = feat_gen.compute_features_for_chunk(chunk, workers=args.workers)
             
-            # Extract features for LightGBM exactly in feature_names order
+            # Extract features for LightGBM
             X = np.column_stack([feat_dict[name] for name in feature_names])
             
             # Free memory
@@ -145,9 +149,13 @@ def main():
             match_mask = scores > args.threshold
             match_indices = np.where(match_mask)[0]
             
-            for idx in match_indices:
-                predicted_matches.append((query_ids[idx], cand_ids[idx]))
-                
+            # Write immediately to disk
+            if len(match_indices) > 0:
+                with open(temp_csv_path, "a") as f:
+                    for idx in match_indices:
+                        f.write(f"{query_ids[idx]},{cand_ids[idx]}\n")
+            
+            total_matches_found += len(match_indices)
             speed = chunk_size / (time.perf_counter() - t_chunk)
             print(f"  chunk_{i:05d}_{source_name} [{start_idx}+{chunk_size}] "
                   f"found {len(match_indices)} matches | {speed:.0f} rows/s")
@@ -155,18 +163,23 @@ def main():
     print(f"\nFeature generation & prediction complete in {time.time()-t0:.1f}s")
     
     # 4. Format Submission
-    print(f"\nFormatting submission for {len(predicted_matches)} matched pairs...")
+    print(f"\nFormatting submission for {total_matches_found} matched pairs...")
     
-    # Group matches by query_id
+    # Group matches by query_id using the temp file
     from collections import defaultdict
-    matches_by_query = defaultdict(list)
+    matches_by_query = defaultdict(set)
     
-    # Filter duplicates (in case exact and dense returned the same pair)
-    unique_matches = list(set(predicted_matches))
-    print(f"Unique matched pairs: {len(unique_matches)}")
-    
-    for q_id, c_id in unique_matches:
-        matches_by_query[q_id].append(c_id)
+    if os.path.exists(temp_csv_path):
+        with open(temp_csv_path, "r") as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) == 2:
+                    matches_by_query[parts[0]].add(parts[1])
+                    
+        # Remove temp file
+        os.remove(temp_csv_path)
+    total_unique = sum(len(cands) for cands in matches_by_query.values())
+    print(f"Unique matched pairs: {total_unique}")
         
     # Get ALL query IDs from S1 so we output a prediction for every S1 entity
     # (even if the prediction is empty)
