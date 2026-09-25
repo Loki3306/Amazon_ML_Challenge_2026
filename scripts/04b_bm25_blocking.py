@@ -139,9 +139,27 @@ def chunked_topk_sparse(query_matrix: sp.csr_matrix, corpus_matrix_T: sp.csr_mat
     all_rows, all_cols, all_scores = [], [], []
 
     if use_fast:
-        result = topk_fn(query_matrix, corpus_matrix_T)
-        cx = result.tocoo()
-        return cx.row.astype(np.int32), cx.col.astype(np.int32), cx.data.astype(np.float32)
+        import time
+        t_start = time.time()
+        for start in range(0, n_queries, chunk_size):
+            t_chunk = time.time()
+            end = min(start + chunk_size, n_queries)
+            q_chunk = query_matrix[start:end]
+            result = topk_fn(q_chunk, corpus_matrix_T)
+            cx = result.tocoo()
+            
+            all_rows.extend((cx.row + start).tolist())
+            all_cols.extend(cx.col.tolist())
+            all_scores.extend(cx.data.tolist())
+            
+            elapsed = time.time() - t_start
+            throughput = end / elapsed if elapsed > 0 else 0
+            eta_s = (n_queries - end) / throughput if throughput > 0 else 0
+            
+            from datetime import timedelta
+            eta_str = str(timedelta(seconds=int(eta_s)))
+            print(f"  [C++ Fast Path] {end}/{n_queries} queries | {throughput:.1f} q/s | ETA: {eta_str}")
+        return np.array(all_rows, dtype=np.int32), np.array(all_cols, dtype=np.int32), np.array(all_scores, dtype=np.float32)
 
     for start in range(0, n_queries, chunk_size):
         end = min(start + chunk_size, n_queries)
