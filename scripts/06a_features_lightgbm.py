@@ -236,64 +236,25 @@ class TokenIndex:
         return out
 
 
-from concurrent.futures import ThreadPoolExecutor
+def fast_paired_sim(s1_list, cand_list, scorer) -> np.ndarray:
+    return np.array(list(map(scorer, s1_list, cand_list)), dtype=np.float32)
 
-def _paired_sim_worker(s1_chunk, cand_chunk, scorer):
-    return np.array([scorer(a, b) for a, b in zip(s1_chunk, cand_chunk)], dtype=np.float32)
-
-def parallel_paired_sim(s1_list, cand_list, scorer, workers: int) -> np.ndarray:
-    n = len(s1_list)
-    if n == 0:
-        return np.array([], dtype=np.float32)
-    if workers <= 1:
-        return _paired_sim_worker(s1_list, cand_list, scorer)
+def fast_token_jaccard(s1_list, cand_list) -> np.ndarray:
+    def get_token_sets(strings):
+        unique_strs = set(strings)
+        str_to_set = {s: frozenset(s.split()) for s in unique_strs}
+        return [str_to_set[s] for s in strings]
         
-    chunk_size = max(1, n // (workers * 4))
-    futures = []
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        for i in range(0, n, chunk_size):
-            futures.append(
-                executor.submit(_paired_sim_worker, 
-                                s1_list[i:i+chunk_size], 
-                                cand_list[i:i+chunk_size], 
-                                scorer)
-            )
-    return np.concatenate([f.result() for f in futures])
-
-def _token_jaccard_worker(s1_addrs, cand_addrs):
-    tok_s1 = TokenIndex(s1_addrs)
-    tok_cand = TokenIndex(cand_addrs)
-    n = len(s1_addrs)
-    out = np.ones(n, dtype=np.float32)
-    for i in range(n):
-        sa = tok_s1.sets[i]
-        sb = tok_cand.sets[i]
-        if not sa and not sb:
-            out[i] = 1.0
-        elif not sa or not sb:
-            out[i] = 0.0
-        else:
-            inter = len(sa & sb)
-            out[i] = inter / (len(sa) + len(sb) - inter)
-    return out
-
-def parallel_token_jaccard(s1_list, cand_list, workers: int) -> np.ndarray:
-    n = len(s1_list)
-    if n == 0:
-        return np.array([], dtype=np.float32)
-    if workers <= 1:
-        return _token_jaccard_worker(s1_list, cand_list)
+    s1_sets = get_token_sets(s1_list)
+    cand_sets = get_token_sets(cand_list)
+    
+    def jaccard(sa, sb):
+        if not sa and not sb: return 1.0
+        if not sa or not sb: return 0.0
+        inter = len(sa & sb)
+        return inter / (len(sa) + len(sb) - inter)
         
-    chunk_size = max(1, n // (workers * 4))
-    futures = []
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        for i in range(0, n, chunk_size):
-            futures.append(
-                executor.submit(_token_jaccard_worker, 
-                                s1_list[i:i+chunk_size], 
-                                cand_list[i:i+chunk_size])
-            )
-    return np.concatenate([f.result() for f in futures])
+    return np.array(list(map(jaccard, s1_sets, cand_sets)), dtype=np.float32)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -331,7 +292,6 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
 
     # ── G1: Name similarities ─────────────────────────────────────────────────
     name_jw  = np.ones(n, dtype=np.float32)
-    name_jar = np.ones(n, dtype=np.float32)
     name_lev = np.ones(n, dtype=np.float32)
     name_tok_jac = np.ones(n, dtype=np.float32)
 
@@ -341,10 +301,9 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         cand_n_sub = [cand_names[i] for i in range(n) if need_name[i]]
         idx        = np.where(need_name)[0]
 
-        name_jw[idx]  = parallel_paired_sim(s1_n_sub, cand_n_sub, JaroWinkler.normalized_similarity, workers)
-        name_jar[idx] = parallel_paired_sim(s1_n_sub, cand_n_sub, Jaro.normalized_similarity, workers)
-        name_lev[idx] = parallel_paired_sim(s1_n_sub, cand_n_sub, Levenshtein.normalized_similarity, workers)
-        name_tok_jac[idx] = parallel_token_jaccard(s1_n_sub, cand_n_sub, workers)
+        name_jw[idx]  = fast_paired_sim(s1_n_sub, cand_n_sub, JaroWinkler.normalized_similarity)
+        name_lev[idx] = fast_paired_sim(s1_n_sub, cand_n_sub, Levenshtein.normalized_similarity)
+        name_tok_jac[idx] = fast_token_jaccard(s1_n_sub, cand_n_sub)
 
     # ── G2: Address similarities ──────────────────────────────────────────────
     addr_jw  = np.ones(n, dtype=np.float32)
@@ -357,9 +316,9 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         cand_a_sub = [cand_addrs[i] for i in range(n) if need_addr[i]]
         idx_a      = np.where(need_addr)[0]
 
-        addr_jw[idx_a]  = parallel_paired_sim(s1_a_sub, cand_a_sub, JaroWinkler.normalized_similarity, workers)
-        addr_lev[idx_a] = parallel_paired_sim(s1_a_sub, cand_a_sub, Levenshtein.normalized_similarity, workers)
-        addr_tok[idx_a] = parallel_token_jaccard(s1_a_sub, cand_a_sub, workers)
+        addr_jw[idx_a]  = fast_paired_sim(s1_a_sub, cand_a_sub, JaroWinkler.normalized_similarity)
+        addr_lev[idx_a] = fast_paired_sim(s1_a_sub, cand_a_sub, Levenshtein.normalized_similarity)
+        addr_tok[idx_a] = fast_token_jaccard(s1_a_sub, cand_a_sub)
 
     # ── G4: Retrieval signals (already numeric) ───────────────────────────────
     dense_scores = chunk["dense_score"].to_numpy().astype(np.float32)
@@ -370,7 +329,6 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         # G1 name
         "name_exact_norm":    name_exact_norm,
         "name_jaro_winkler":  name_jw,
-        "name_jaro":          name_jar,
         "name_levenshtein":   name_lev,
         "name_token_jaccard": name_tok_jac,
         # G2 address
@@ -391,7 +349,7 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
 
 
 FEATURE_COLS: list[str] = [
-    "name_exact_norm", "name_jaro_winkler", "name_jaro", "name_levenshtein",
+    "name_exact_norm", "name_jaro_winkler", "name_levenshtein",
     "name_token_jaccard",
     "addr_exact_norm", "addr_jaro_winkler", "addr_levenshtein", "addr_token_jaccard",
     "country_exact",
@@ -843,7 +801,7 @@ def main() -> None:
                  args.benchmark_rows)
         dense_path = os.path.join(args.candidates_dir,
                                   f"{args.split}_dense_candidates_K50.parquet")
-        bm_chunk = pl.read_parquet(dense_path).head(args.benchmark_rows)
+        bm_chunk = pl.scan_parquet(dense_path).head(args.benchmark_rows).collect()
         q_ids = bm_chunk["query_id"].to_list()
         c_ids = bm_chunk["candidate_id"].to_list()
         pos_set = {(s, c) for s, ms in gt.items() for c in ms}
