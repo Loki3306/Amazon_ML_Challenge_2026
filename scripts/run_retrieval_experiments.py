@@ -35,6 +35,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 def parse_args():
     parser = argparse.ArgumentParser(description="Retrieval Optimization Experiment Suite")
     parser.add_argument("--data-dir", type=str, default="data/processed", help="Path to processed parquet data")
+    parser.add_argument("--input-dir", type=str, default="student_resource/dataset/train", help="Raw dataset TSV folder")
     parser.add_argument("--ground-truth", type=str, default="data/student_resource/dataset/train/train_ground_truth.tsv", help="Path to ground truth TSV")
     parser.add_argument("--candidates-dir", type=str, default="data/candidates", help="Path to candidates parquet directory")
     parser.add_argument("--output-dir", type=str, default="reports/retrieval", help="Path to save experiment JSON reports")
@@ -93,12 +94,52 @@ def load_ground_truth(gt_path: str, valid_corpus_set: set[str] = None) -> dict[s
             gt_dict[q_id] = set(m_ids)
     return gt_dict
 
-def load_dataset_subset(data_dir: str, n_queries: int, n_corpus: int):
-    select_cols = ["entity_id", "source", "name_norm", "address_norm", "country"]
+def load_dataset_subset(data_dir: str, n_queries: int, n_corpus: int, input_dir: str = "student_resource/dataset/train"):
     s1_path = os.path.join(data_dir, "train", "train_source1.parquet")
     s2_path = os.path.join(data_dir, "train", "train_source2.parquet")
     s3_path = os.path.join(data_dir, "train", "train_source3.parquet")
 
+    if not all(os.path.exists(p) for p in [s1_path, s2_path, s3_path]):
+        print("Processed parquet files missing. Preparing from raw TSV files...")
+        os.makedirs(os.path.join(data_dir, "train"), exist_ok=True)
+        raw_s1 = os.path.join(input_dir, "train_source1.tsv")
+        raw_s2 = os.path.join(input_dir, "train_source2.tsv")
+        raw_s3 = os.path.join(input_dir, "train_source3.tsv")
+
+        # Fallback search for input_dir if specified path is invalid
+        if not os.path.exists(raw_s1):
+            fallbacks = [
+                "/kaggle/input/student-resource-amazonml/dataset/train",
+                "/kaggle/input/datasets/lokeshgile/student-resource-amazonml/dataset/train",
+                "student_resource/dataset/train"
+            ]
+            for fb in fallbacks:
+                if os.path.exists(os.path.join(fb, "train_source1.tsv")):
+                    input_dir = fb
+                    raw_s1 = os.path.join(input_dir, "train_source1.tsv")
+                    raw_s2 = os.path.join(input_dir, "train_source2.tsv")
+                    raw_s3 = os.path.join(input_dir, "train_source3.tsv")
+                    break
+
+        schema = {
+            "entity_id": pl.Utf8,
+            "business_name": pl.Utf8,
+            "business_address": pl.Utf8,
+            "country": pl.Utf8
+        }
+
+        for r_path, out_p, s_name in [(raw_s1, s1_path, "S1"), (raw_s2, s2_path, "S2"), (raw_s3, s3_path, "S3")]:
+            print(f"Converting {s_name} from {r_path} -> {out_p}...")
+            df = pl.read_csv(r_path, separator="\t", schema_overrides=schema, null_values=[""])
+            df = df.with_columns([
+                pl.lit(s_name).alias("source"),
+                pl.col("business_name").fill_null("").str.to_lowercase().str.strip_chars().alias("name_norm"),
+                pl.col("business_address").fill_null("").str.to_lowercase().str.strip_chars().alias("address_norm"),
+                pl.col("country").fill_null("").str.to_lowercase().str.strip_chars().alias("country_norm")
+            ])
+            df.write_parquet(out_p, compression="snappy")
+
+    select_cols = ["entity_id", "source", "name_norm", "address_norm", "country"]
     s1_df = pl.read_parquet(s1_path, columns=select_cols)
     if n_queries > 0 and n_queries < s1_df.height:
         s1_df = s1_df.head(n_queries)
@@ -224,7 +265,7 @@ def main():
     print("==================================================")
 
     # 1. Load Data
-    s1_df, corpus_df = load_dataset_subset(args.data_dir, args.n_queries, args.n_corpus)
+    s1_df, corpus_df = load_dataset_subset(args.data_dir, args.n_queries, args.n_corpus, args.input_dir)
     s1_ids = s1_df["entity_id"].to_numpy()
     corpus_ids = corpus_df["entity_id"].to_numpy()
     valid_corpus_set = set(corpus_ids)
