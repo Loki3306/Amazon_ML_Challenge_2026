@@ -73,6 +73,7 @@ def main():
         os.remove(temp_csv_path)
         
     total_matches_found = 0
+    total_candidates_processed = 0
     
     for source_name, source_path in sources:
         if not os.path.exists(source_path):
