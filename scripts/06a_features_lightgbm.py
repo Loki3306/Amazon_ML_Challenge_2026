@@ -484,12 +484,22 @@ def save_manifest(manifest_path: str, manifest: dict) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 def generate_features(
     args,
-    labeled_df: pl.DataFrame,
+    gt: dict[str, frozenset[str]],
     s1_df: pl.DataFrame,
     cand_df: pl.DataFrame,
     val_s1_ids: frozenset[str],
 ) -> tuple[list[str], list[str]]:
-    """Writes shards; returns (train_shards, val_shards)."""
+    """
+    Streams candidates DIRECTLY from Parquet files in chunks.
+    NEVER collects the full 126M labeled table.
+
+    Strategy:
+    1. Scan dense candidates parquet in offset-based chunks.
+    2. Scan exact candidates separately and append as final chunks.
+    3. Label each chunk via a Python dict lookup (O(1) per pair).
+    4. Compute features per chunk.
+    5. Write shard, update manifest, free memory.
+    """
     train_dir = os.path.join(args.features_dir, args.split, "train")
     val_dir   = os.path.join(args.features_dir, args.split, "val")
     os.makedirs(train_dir, exist_ok=True)
@@ -498,15 +508,23 @@ def generate_features(
     manifest_path = os.path.join(args.features_dir, args.split, "features_manifest.json")
     manifest = load_manifest(manifest_path)
 
-    n = labeled_df.height
-    log.info("Feature generation: %d rows, chunk=%d, workers=%d",
-             n, args.chunk_size, args.workers)
+    # ── Build positive-pair lookup dict  (fast O(1) label per row) ──────────
+    # gt = {s1_id: frozenset(candidate_ids)}
+    # Flatten into a set of (s1_id, cand_id) tuples for O(1) lookup
+    log.info("Building positive-pair lookup set...")
+    t0 = time.perf_counter()
+    pos_pairs: set[tuple[str, str]] = set()
+    for s1_id, matches in gt.items():
+        for c in matches:
+            pos_pairs.add((s1_id, c))
+    log.info("  %d positive pairs in lookup (%.1fs)", len(pos_pairs),
+             time.perf_counter() - t0)
 
-    # S1 / candidate lookup frames (for join)
-    s1_join = s1_df.rename({"entity_id": "query_id",
-                             "name_norm":    "s1_name",
-                             "address_norm": "s1_addr",
-                             "country_norm": "s1_country"})
+    # ── S1 / candidate join lookup frames ────────────────────────────────────
+    s1_join   = s1_df.rename({"entity_id": "query_id",
+                               "name_norm":    "s1_name",
+                               "address_norm": "s1_addr",
+                               "country_norm": "s1_country"})
     cand_join = cand_df.rename({"entity_id":    "candidate_id",
                                 "name_norm":    "cand_name",
                                 "address_norm": "cand_addr",
@@ -514,82 +532,135 @@ def generate_features(
 
     train_shards: list[str] = []
     val_shards:   list[str] = []
-    t_start = time.perf_counter()
+    shard_idx = 0
+    t_start   = time.perf_counter()
 
-    for shard_idx, chunk_start in enumerate(range(0, n, args.chunk_size)):
-        chunk_end = min(chunk_start + args.chunk_size, n)
-        shard_key = f"shard_{shard_idx:05d}"
+    dense_path = os.path.join(args.candidates_dir,
+                              f"{args.split}_dense_candidates_K50.parquet")
+    exact_path = os.path.join(args.candidates_dir,
+                              f"{args.split}_exact_candidates.parquet")
 
-        # ── Resumability: skip if already written ──────────────────────────
-        if shard_key in manifest["completed_shards"]:
-            info = manifest["completed_shards"][shard_key]
-            tp, vp = info["train_path"], info["val_path"]
-            if os.path.exists(tp): train_shards.append(tp)
-            if os.path.exists(vp): val_shards.append(vp)
-            log.info("SKIP %s (already written)", shard_key)
-            continue
+    # ── Stream each parquet source in chunks ─────────────────────────────────
+    sources = []
+    if os.path.exists(dense_path):
+        sources.append(("dense", dense_path))
+    if os.path.exists(exact_path):
+        sources.append(("exact", exact_path))
 
-        t0 = time.perf_counter()
-        chunk = labeled_df.slice(chunk_start, chunk_end - chunk_start)
+    for src_name, src_path in sources:
+        log.info("Processing source: %s (%s)", src_name, src_path)
 
-        # Join entity attributes
-        chunk = (chunk
-                 .join(s1_join,   on="query_id",     how="left")
-                 .join(cand_join, on="candidate_id",  how="left"))
-        for col in ["s1_name", "s1_addr", "s1_country",
-                    "cand_name", "cand_addr", "cand_country"]:
-            chunk = chunk.with_columns(pl.col(col).fill_null(""))
+        # Get total row count without loading data
+        total_rows = pl.scan_parquet(src_path).select(pl.len()).collect().item()
+        log.info("  %d rows", total_rows)
 
-        # Compute features
-        feats = compute_features_for_chunk(chunk, workers=args.workers)
+        for offset in range(0, total_rows, args.chunk_size):
+            shard_key = f"shard_{shard_idx:05d}_{src_name}"
 
-        # Assemble shard DataFrame
-        shard_data: dict[str, Any] = {
-            "query_id":     chunk["query_id"],
-            "candidate_id": chunk["candidate_id"],
-            "label":        chunk["label"],
-        }
-        for col in FEATURE_COLS:
-            shard_data[col] = feats[col]
-        shard_df = pl.DataFrame(shard_data)
+            # Resumability
+            if shard_key in manifest["completed_shards"]:
+                info = manifest["completed_shards"][shard_key]
+                if os.path.exists(info["train_path"]):
+                    train_shards.append(info["train_path"])
+                if os.path.exists(info["val_path"]):
+                    val_shards.append(info["val_path"])
+                log.info("SKIP %s", shard_key)
+                shard_idx += 1
+                continue
 
-        # Train / val split by query_id
-        is_val_mask  = chunk["query_id"].is_in(list(val_s1_ids))
-        train_shard  = shard_df.filter(~is_val_mask)
-        val_shard    = shard_df.filter( is_val_mask)
+            t0 = time.perf_counter()
 
-        train_path = os.path.join(train_dir, f"{shard_key}.parquet")
-        val_path   = os.path.join(val_dir,   f"{shard_key}.parquet")
-        train_shard.write_parquet(train_path, compression=args.compression)
-        val_shard.write_parquet(val_path,     compression=args.compression)
+            # Read this chunk from Parquet (streaming, small)
+            chunk = pl.read_parquet(src_path).slice(offset, args.chunk_size)
 
-        elapsed  = time.perf_counter() - t0
-        rps      = (chunk_end - chunk_start) / elapsed
-        log.info("%s [%d:%d]  train=%d  val=%d  %.0f rows/s  RAM=%.1fGB",
-                 shard_key, chunk_start, chunk_end,
-                 train_shard.height, val_shard.height, rps, ram_gb())
+            # Select only needed columns
+            needed = ["query_id", "candidate_id", "candidate_source"]
+            if "dense_score" in chunk.columns:
+                needed += ["dense_score", "dense_rank"]
+            chunk = chunk.select([c for c in needed if c in chunk.columns])
 
-        manifest["completed_shards"][shard_key] = {
-            "train_path": train_path, "val_path": val_path,
-            "train_rows": train_shard.height, "val_rows": val_shard.height,
-            "chunk_start": chunk_start, "chunk_end": chunk_end,
-        }
-        save_manifest(manifest_path, manifest)
-        train_shards.append(train_path)
-        val_shards.append(val_path)
+            # Fill missing dense columns for exact-only rows
+            if "dense_score" not in chunk.columns:
+                chunk = chunk.with_columns([
+                    pl.lit(0.0).cast(pl.Float32).alias("dense_score"),
+                    pl.lit(999).cast(pl.Int32).alias("dense_rank"),
+                ])
+            # retrieval_source: 0=dense, 1=exact
+            src_code = 0 if src_name == "dense" else 1
+            chunk = chunk.with_columns(
+                pl.lit(src_code).cast(pl.Int8).alias("retrieval_source")
+            )
 
-        del chunk, shard_df, train_shard, val_shard, feats
-        gc.collect()
+            # Label via dict lookup (no join, no memory spike)
+            q_ids = chunk["query_id"].to_list()
+            c_ids = chunk["candidate_id"].to_list()
+            labels = np.array(
+                [1 if (q, c) in pos_pairs else 0
+                 for q, c in zip(q_ids, c_ids)],
+                dtype=np.int8
+            )
+            chunk = chunk.with_columns(pl.Series("label", labels))
+
+            # Join entity attributes
+            chunk = (chunk
+                     .join(s1_join,   on="query_id",     how="left")
+                     .join(cand_join, on="candidate_id",  how="left"))
+            for col in ["s1_name", "s1_addr", "s1_country",
+                        "cand_name", "cand_addr", "cand_country"]:
+                chunk = chunk.with_columns(pl.col(col).fill_null(""))
+
+            # Compute features
+            feats = compute_features_for_chunk(chunk, workers=args.workers)
+
+            # Assemble shard
+            shard_data: dict[str, Any] = {
+                "query_id":     chunk["query_id"],
+                "candidate_id": chunk["candidate_id"],
+                "label":        chunk["label"],
+            }
+            for col in FEATURE_COLS:
+                shard_data[col] = feats[col]
+            shard_df = pl.DataFrame(shard_data)
+
+            # Train / val split by query_id
+            is_val = chunk["query_id"].is_in(list(val_s1_ids))
+            train_shard = shard_df.filter(~is_val)
+            val_shard   = shard_df.filter( is_val)
+
+            train_path = os.path.join(train_dir, f"{shard_key}.parquet")
+            val_path   = os.path.join(val_dir,   f"{shard_key}.parquet")
+            train_shard.write_parquet(train_path, compression=args.compression)
+            val_shard.write_parquet(  val_path,   compression=args.compression)
+
+            elapsed = time.perf_counter() - t0
+            rps     = len(q_ids) / elapsed
+            n_pos   = int(labels.sum())
+            log.info("%s [%d+%d]  pos=%d  train=%d  val=%d  %.0f rows/s  RAM=%.1fGB",
+                     shard_key, offset, len(q_ids), n_pos,
+                     train_shard.height, val_shard.height, rps, ram_gb())
+
+            manifest["completed_shards"][shard_key] = {
+                "train_path": train_path, "val_path": val_path,
+                "train_rows": train_shard.height, "val_rows": val_shard.height,
+                "source": src_name, "offset": offset,
+            }
+            save_manifest(manifest_path, manifest)
+            train_shards.append(train_path)
+            val_shards.append(val_path)
+
+            del chunk, shard_df, train_shard, val_shard, feats, labels
+            gc.collect()
+            shard_idx += 1
 
     total_t = time.perf_counter() - t_start
-    log.info("Feature generation complete: %d shards in %.1fs", len(train_shards), total_t)
-
+    log.info("Feature generation complete: %d shards in %.1fs",
+             len(train_shards), total_t)
     manifest["feature_generation_seconds"] = round(total_t, 2)
     manifest["feature_cols"] = FEATURE_COLS
     manifest["chunk_size"]   = args.chunk_size
     save_manifest(manifest_path, manifest)
-
     return train_shards, val_shards
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -756,26 +827,27 @@ def main() -> None:
 
     # ── Ground truth ─────────────────────────────────────────────────────────
     gt = load_ground_truth(args.ground_truth)
-    label_frame = build_label_frame(gt)
-
-    # ── Candidate table with labels ──────────────────────────────────────────
-    log.info("Materialising labeled candidate table...")
-    t0 = time.perf_counter()
-    cand_lf = load_candidates_lazy(args.candidates_dir, args.split)
-    labeled_df = (cand_lf
-                  .join(label_frame.lazy(), on=["query_id", "candidate_id"],
-                        how="left")
-                  .with_columns(pl.col("label").fill_null(0).cast(pl.Int8))
-                  .collect())
-    log.info("  %d pairs  (%.1fs)", labeled_df.height, time.perf_counter() - t0)
 
     # ── BENCHMARK mode ───────────────────────────────────────────────────────
+    # For benchmark we need a small labeled sample — collect ONLY benchmark_rows
     if args.benchmark:
-        run_benchmark(args, labeled_df, s1_df, cand_df)
+        log.info("Benchmark: collecting %d rows from dense candidates...",
+                 args.benchmark_rows)
+        dense_path = os.path.join(args.candidates_dir,
+                                  f"{args.split}_dense_candidates_K50.parquet")
+        bm_chunk = pl.read_parquet(dense_path).head(args.benchmark_rows)
+        q_ids = bm_chunk["query_id"].to_list()
+        c_ids = bm_chunk["candidate_id"].to_list()
+        pos_set = {(s, c) for s, ms in gt.items() for c in ms}
+        labels = [1 if (q, c) in pos_set else 0 for q, c in zip(q_ids, c_ids)]
+        bm_chunk = bm_chunk.with_columns(pl.Series("label", labels, dtype=pl.Int8))
+        if "retrieval_source" not in bm_chunk.columns:
+            bm_chunk = bm_chunk.with_columns(pl.lit(0).cast(pl.Int8).alias("retrieval_source"))
+        run_benchmark(args, bm_chunk, s1_df, cand_df)
         return
 
-    # ── Train / val S1 split ─────────────────────────────────────────────────
-    all_s1_ids = labeled_df["query_id"].unique().to_list()
+    # ── Train / val S1 split  (from s1_df — already in RAM, ~2.2M rows) ─────
+    all_s1_ids = s1_df["entity_id"].to_list()
     rng        = np.random.default_rng(args.seed)
     rng.shuffle(all_s1_ids)
     val_cut    = int(len(all_s1_ids) * args.val_fraction)
@@ -785,7 +857,7 @@ def main() -> None:
     # ── Feature generation ───────────────────────────────────────────────────
     if not args.skip_features:
         train_shards, val_shards = generate_features(
-            args, labeled_df, s1_df, cand_df, val_s1_ids)
+            args, gt, s1_df, cand_df, val_s1_ids)
     else:
         manifest_path = os.path.join(args.features_dir, args.split,
                                      "features_manifest.json")
@@ -801,6 +873,7 @@ def main() -> None:
     if args.skip_training:
         log.info("Skipped LightGBM training (--skip-training).")
         return
+
 
     # ── LightGBM ─────────────────────────────────────────────────────────────
     result      = train_lightgbm(args, train_shards, val_shards)
