@@ -140,7 +140,7 @@ def main():
     # ---------------------------------------------------------
     print("Populating Index with 10.3M vectors directly to GPUs...")
     t0 = time.time()
-    chunk_size = 1_000_000
+    chunk_size = 200_000
     for i in range(0, total_corpus_rows, chunk_size):
         end_idx = min(i + chunk_size, total_corpus_rows)
         fp32_chunk = memmap_array[i:end_idx].astype(np.float32)
