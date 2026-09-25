@@ -33,6 +33,16 @@ from sentence_transformers import SentenceTransformer
 import faiss
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+def find_file_in_search_paths(target_filename: str, search_roots: list[str]) -> str:
+    for root_path in search_roots:
+        if os.path.exists(root_path):
+            if os.path.isfile(root_path) and os.path.basename(root_path) == target_filename:
+                return root_path
+            for root, _, files in os.walk(root_path):
+                if target_filename in files:
+                    return os.path.join(root, target_filename)
+    return ""
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Kaggle Retrieval Optimization Execution Script")
     parser.add_argument("--data-dir", type=str, default="/kaggle/working/data/processed", help="Path to processed parquet data")
@@ -55,19 +65,15 @@ def main():
     print(f" Execution Device: {device.upper()}")
     print("="*70)
 
-    # 1. Verify Ground Truth
+    # 1. Verify Ground Truth with Recursive Auto-Discovery
     gt_path = args.ground_truth
     if not os.path.exists(gt_path):
-        # Try fallback paths
-        fallbacks = [
-            "data/student_resource/dataset/train/train_ground_truth.tsv",
-            "/kaggle/input/datasets/lokeshgile/student-resource-amazonml/dataset/train/train_ground_truth.tsv",
-            "/kaggle/input/student-resource/dataset/train/train_ground_truth.tsv"
-        ]
-        for fb in fallbacks:
-            if os.path.exists(fb):
-                gt_path = fb
-                break
+        found_gt = find_file_in_search_paths("train_ground_truth.tsv", ["/kaggle/input", "/kaggle/working", ".", "student_resource", "data"])
+        if found_gt:
+            gt_path = found_gt
+
+    if not os.path.exists(gt_path):
+        raise FileNotFoundError(f"Could not find ground truth file 'train_ground_truth.tsv'. Looked at '{args.ground_truth}' and searched '/kaggle/input'. Please verify dataset is attached on Kaggle.")
 
     print(f"Using Ground Truth file: {gt_path}")
     
@@ -89,10 +95,20 @@ def main():
 
     if not all(os.path.exists(p) for p in [s1_path, s2_path, s3_path]):
         print("Processed parquet files missing. Preparing from raw TSVs...")
-        # Add auto-prep logic here for Kaggle standalone run
         raw_s1 = os.path.join(args.input_dir, "train_source1.tsv")
         raw_s2 = os.path.join(args.input_dir, "train_source2.tsv")
         raw_s3 = os.path.join(args.input_dir, "train_source3.tsv")
+        
+        if not os.path.exists(raw_s1):
+            found_s1 = find_file_in_search_paths("train_source1.tsv", ["/kaggle/input", "/kaggle/working", ".", "student_resource", "data"])
+            if found_s1:
+                input_dir = os.path.dirname(found_s1)
+                raw_s1 = os.path.join(input_dir, "train_source1.tsv")
+                raw_s2 = os.path.join(input_dir, "train_source2.tsv")
+                raw_s3 = os.path.join(input_dir, "train_source3.tsv")
+
+        if not os.path.exists(raw_s1):
+            raise FileNotFoundError(f"Could not locate 'train_source1.tsv' under '{args.input_dir}' or under '/kaggle/input'.")
         
         os.makedirs(os.path.join(args.data_dir, "train"), exist_ok=True)
         

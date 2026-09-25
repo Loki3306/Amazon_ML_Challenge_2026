@@ -83,7 +83,7 @@ def find_file_in_search_paths(target_filename: str, search_roots: list[str]) -> 
 
 def load_ground_truth(gt_path: str, valid_corpus_set: set[str] = None) -> dict[str, set[str]]:
     if not os.path.exists(gt_path):
-        found_gt = find_file_in_search_paths("train_ground_truth.tsv", ["/kaggle/input", ".", "student_resource", "data"])
+        found_gt = find_file_in_search_paths("train_ground_truth.tsv", ["/kaggle/input", "/kaggle/working", ".", "..", "student_resource", "data"])
         if found_gt:
             gt_path = found_gt
 
@@ -117,7 +117,7 @@ def load_dataset_subset(data_dir: str, n_queries: int, n_corpus: int, input_dir:
         raw_s3 = os.path.join(input_dir, "train_source3.tsv")
 
         if not os.path.exists(raw_s1):
-            found_s1 = find_file_in_search_paths("train_source1.tsv", ["/kaggle/input", ".", "student_resource", "data"])
+            found_s1 = find_file_in_search_paths("train_source1.tsv", ["/kaggle/input", "/kaggle/working", ".", "..", "student_resource", "data"])
             if found_s1:
                 input_dir = os.path.dirname(found_s1)
                 raw_s1 = os.path.join(input_dir, "train_source1.tsv")
