@@ -70,7 +70,16 @@ def main():
     if args.ground_truth.endswith('.parquet'):
         gt_df = pl.read_parquet(args.ground_truth)
     else:
-        gt_df = pl.read_csv(args.ground_truth, separator='\t').rename({"source1_id": "query_id", "source2_id": "candidate_id"})
+        # TSV format is: source1_entity_id \t matched_entity_ids (comma separated)
+        gt_df = pl.read_csv(args.ground_truth, separator='\t').rename({
+            "source1_entity_id": "query_id", 
+            "matched_entity_ids": "candidate_id"
+        })
+        
+        # Split the comma-separated candidate IDs into a list, then explode into rows
+        gt_df = gt_df.with_columns(
+            pl.col("candidate_id").str.split(",")
+        ).explode("candidate_id")
         
     # Standardize types
     gt_df = gt_df.with_columns([
