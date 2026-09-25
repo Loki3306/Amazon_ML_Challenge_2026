@@ -239,21 +239,51 @@ def build_ivfflat_index(corpus_embeddings: np.ndarray, nlist: int):
     d = corpus_embeddings.shape[1]
     quantizer = faiss.IndexFlatIP(d)
     effective_nlist = min(nlist, corpus_embeddings.shape[0])
-    index = faiss.IndexIVFFlat(quantizer, d, effective_nlist, faiss.METRIC_INNER_PRODUCT)
+    cpu_index = faiss.IndexIVFFlat(quantizer, d, effective_nlist, faiss.METRIC_INNER_PRODUCT)
 
     t0 = time.time()
     train_samples = corpus_embeddings.astype(np.float32)
-    index.train(train_samples)
-    index.add(train_samples)
-    build_time = time.time() - t0
+    sample_size = min(1_000_000, len(train_samples))
 
+    if torch.cuda.is_available():
+        res = faiss.StandardGpuResources()
+        gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
+        gpu_index.train(train_samples[:sample_size])
+        gpu_index.add(train_samples)
+        index = gpu_index
+    else:
+        cpu_index.train(train_samples[:sample_size])
+        cpu_index.add(train_samples)
+        index = cpu_index
+
+    build_time = time.time() - t0
     return index, build_time, effective_nlist
 
-def search_ivfflat_index(index: faiss.IndexIVFFlat, query_embeddings: np.ndarray, effective_nlist: int, nprobe: int, top_k: int):
-    index.nprobe = min(nprobe, effective_nlist)
+def search_ivfflat_index(index, query_embeddings: np.ndarray, effective_nlist: int, nprobe: int, top_k: int):
+    target_p = min(nprobe, effective_nlist)
+    if torch.cuda.is_available():
+        try:
+            ps = faiss.GpuParameterSpace()
+            ps.set_index_parameter(index, "nprobe", target_p)
+        except Exception:
+            index.nprobe = target_p
+    else:
+        index.nprobe = target_p
 
     t0 = time.time()
-    scores, indices = index.search(query_embeddings.astype(np.float32), top_k)
+    num_queries = query_embeddings.shape[0]
+    batch_size = 4096
+    all_scores = []
+    all_indices = []
+
+    for i in range(0, num_queries, batch_size):
+        q_batch = query_embeddings[i:i + batch_size].astype(np.float32)
+        s_batch, i_batch = index.search(q_batch, top_k)
+        all_scores.append(s_batch)
+        all_indices.append(i_batch)
+
+    scores = np.vstack(all_scores)
+    indices = np.vstack(all_indices)
     search_time = time.time() - t0
 
     return scores, indices, search_time
