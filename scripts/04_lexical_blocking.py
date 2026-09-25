@@ -89,35 +89,52 @@ def run_lexical_blocking(data_dir, split, output_dir, artifacts_dir, top_k):
     del s1_names
     gc.collect()
     
-    print(f"[{split}] Computing C++ Multi-Threaded Sparse Dot Top-K...")
-    # This C++ function computes cosine similarity and keeps ONLY top-K per row instantly in C++ memory
-    matches = fast_dot(query_tfidf, corpus_tfidf_T, top_k)
+    print(f"[{split}] Computing C++ Sparse Dot Top-K in chunks (to force multi-threading and show progress)...")
     
-    del query_tfidf, corpus_tfidf_T
-    gc.collect()
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from tqdm.auto import tqdm
+    import scipy.sparse as sp
     
-    print(f"[{split}] Mapping results back to entity IDs...")
-    # matches is a CSR matrix of shape (n_queries, n_corpus)
+    batch_size = 100000
+    batches = []
+    for start_idx in range(0, n_queries, batch_size):
+        end_idx = min(start_idx + batch_size, n_queries)
+        batches.append((start_idx, end_idx, query_tfidf[start_idx:end_idx]))
+        
+    def process_chunk(chunk_data):
+        start, end, q_chunk = chunk_data
+        # C++ extension releases GIL, so ThreadPoolExecutor scales perfectly to 400% CPU!
+        return start, end, fast_dot(q_chunk, corpus_tfidf_T, top_k)
+        
     out_query_ids = []
     out_candidate_ids = []
     out_candidate_sources = []
     
-    # Fast extraction from CSR
-    indptr = matches.indptr
-    indices = matches.indices
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(process_chunk, b): b for b in batches}
+        
+        for future in tqdm(as_completed(futures), total=len(batches), desc="Processing Query Batches"):
+            start_idx, end_idx, matches = future.result()
+            
+            # Map results instantly
+            indptr = matches.indptr
+            indices = matches.indices
+            
+            for local_idx in range(matches.shape[0]):
+                global_idx = start_idx + local_idx
+                q_id = s1_ids[global_idx]
+                
+                start_p = indptr[local_idx]
+                end_p = indptr[local_idx+1]
+                
+                for idx in range(start_p, end_p):
+                    c_idx = indices[idx]
+                    out_query_ids.append(q_id)
+                    out_candidate_ids.append(corpus_ids[c_idx])
+                    out_candidate_sources.append(corpus_sources[c_idx])
     
-    for q_idx in range(n_queries):
-        start = indptr[q_idx]
-        end = indptr[q_idx+1]
-        
-        q_id = s1_ids[q_idx]
-        
-        # Get top-k indices for this query
-        for idx in range(start, end):
-            c_idx = indices[idx]
-            out_query_ids.append(q_id)
-            out_candidate_ids.append(corpus_ids[c_idx])
-            out_candidate_sources.append(corpus_sources[c_idx])
+    del query_tfidf, corpus_tfidf_T
+    gc.collect()
             
     print(f"[{split}] Saving candidates to Parquet...")
     candidates_df = pl.DataFrame({
