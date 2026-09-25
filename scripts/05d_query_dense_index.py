@@ -156,12 +156,12 @@ def main():
     print(f"Searching Top-{args.top_k} candidates across {total_corpus_rows} corpus...")
     t0 = time.time()
     
-    # FAISS GPU search requires temporary buffers. 
-    # Searching 2.2M queries at once causes a 4.3 GB TemporaryMemoryOverflow.
     # We must chunk the queries during search.
+    # 50,000 queries caused a 2.45 GB TemporaryMemoryOverflow because FAISS computes distances to all 16k centroids for the batch.
+    # We drop the batch size to 4096 to keep the intermediate matrix at ~260 MB, perfectly safe for VRAM.
     all_scores = []
     all_indices = []
-    search_batch_size = 50000
+    search_batch_size = 4096
     num_queries = query_np.shape[0]
     
     for i in range(0, num_queries, search_batch_size):
@@ -170,7 +170,10 @@ def main():
         s_batch, i_batch = search_index.search(q_batch, args.top_k)
         all_scores.append(s_batch)
         all_indices.append(i_batch)
-        print(f"  Searched {end_idx}/{num_queries} queries.")
+        
+        # Only print every ~100k queries to avoid spamming the Kaggle logs
+        if end_idx % (search_batch_size * 25) < search_batch_size or end_idx == num_queries:
+            print(f"  Searched {end_idx}/{num_queries} queries.")
         
     scores = np.vstack(all_scores)
     indices = np.vstack(all_indices)
