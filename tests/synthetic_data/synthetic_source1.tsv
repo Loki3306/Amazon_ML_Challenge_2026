@@ -1,0 +1,11 @@
+entity_id	business_name	business_address	country
+SYN-1	Normal Corp	123 Main St	US
+SYN-2	Punctuation!!! LLC.	456, Broad Ave.	India
+SYN-3	Café Unicode ëxample	Rüe de l'München	France
+SYN-4	Missing Address Inc		US
+SYN-5	Empty String LLC		US
+SYN-6	Duplicate Name	Diff Address 1	US
+SYN-7	Duplicate Name	Diff Address 2	India
+SYN-8	Unique Name 1	Duplicate Address	France
+SYN-9	Unique Name 2	Duplicate Address	France
+SYN-10	   Whitespace    Test  	   Space   Street  	US

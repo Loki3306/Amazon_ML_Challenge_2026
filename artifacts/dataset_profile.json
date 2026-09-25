@@ -1,0 +1,255 @@
+{
+  "train": {
+    "source1": {
+      "row_count": 2206821,
+      "stats": {
+        "entity_id_null_count": 0,
+        "entity_id_unique_count": 2206821,
+        "business_name_null_count": 0,
+        "business_name_unique_count": 1539229,
+        "business_address_null_count": 0,
+        "business_address_unique_count": 2130606,
+        "country_null_count": 0,
+        "country_unique_count": 2
+      },
+      "lengths": {
+        "name_len_mean": 24.03440333402664,
+        "name_len_p50": 24.0,
+        "name_len_p95": 37.0,
+        "addr_len_mean": 52.0671354858414,
+        "addr_len_p50": 41.0,
+        "addr_len_p95": 103.0
+      },
+      "countries": [
+        {
+          "country": "US",
+          "count": 1323633
+        },
+        {
+          "country": "India",
+          "count": 883188
+        }
+      ]
+    },
+    "source2": {
+      "row_count": 5034616,
+      "stats": {
+        "entity_id_null_count": 0,
+        "entity_id_unique_count": 5034616,
+        "business_name_null_count": 0,
+        "business_name_unique_count": 4402009,
+        "business_address_null_count": 168967,
+        "business_address_unique_count": 4337262,
+        "country_null_count": 0,
+        "country_unique_count": 2
+      },
+      "lengths": {
+        "name_len_mean": 30.312619075615697,
+        "name_len_p50": 25.0,
+        "name_len_p95": 86.0,
+        "addr_len_mean": 49.44302558610372,
+        "addr_len_p50": 37.0,
+        "addr_len_p95": 102.0
+      },
+      "countries": [
+        {
+          "country": "US",
+          "count": 3016817
+        },
+        {
+          "country": "India",
+          "count": 2017799
+        }
+      ]
+    },
+    "source3": {
+      "row_count": 5285603,
+      "stats": {
+        "entity_id_null_count": 0,
+        "entity_id_unique_count": 5285603,
+        "business_name_null_count": 0,
+        "business_name_unique_count": 4651609,
+        "business_address_null_count": 175916,
+        "business_address_unique_count": 4632765,
+        "country_null_count": 0,
+        "country_unique_count": 2
+      },
+      "lengths": {
+        "name_len_mean": 28.016426697199922,
+        "name_len_p50": 25.0,
+        "name_len_p95": 54.0,
+        "addr_len_mean": 49.850900260622616,
+        "addr_len_p50": 43.0,
+        "addr_len_p95": 97.0
+      },
+      "countries": [
+        {
+          "country": "US",
+          "count": 3170056
+        },
+        {
+          "country": "India",
+          "count": 2115547
+        }
+      ]
+    }
+  },
+  "test": {
+    "source1": {
+      "row_count": 1732544,
+      "stats": {
+        "entity_id_null_count": 0,
+        "entity_id_unique_count": 1732544,
+        "business_name_null_count": 0,
+        "business_name_unique_count": 1238867,
+        "business_address_null_count": 0,
+        "business_address_unique_count": 1677483,
+        "country_null_count": 0,
+        "country_unique_count": 3
+      },
+      "lengths": {
+        "name_len_mean": 23.8637154381072,
+        "name_len_p50": 24.0,
+        "name_len_p95": 36.0,
+        "addr_len_mean": 57.265417213069334,
+        "addr_len_p50": 51.0,
+        "addr_len_p95": 105.0
+      },
+      "countries": [
+        {
+          "country": "India",
+          "count": 809986
+        },
+        {
+          "country": "US",
+          "count": 663106
+        },
+        {
+          "country": "France",
+          "count": 259452
+        }
+      ]
+    },
+    "source2": {
+      "row_count": 4887273,
+      "stats": {
+        "entity_id_null_count": 0,
+        "entity_id_unique_count": 4887273,
+        "business_name_null_count": 0,
+        "business_name_unique_count": 4311041,
+        "business_address_null_count": 129408,
+        "business_address_unique_count": 4224784,
+        "country_null_count": 0,
+        "country_unique_count": 3
+      },
+      "lengths": {
+        "name_len_mean": 32.05303898513547,
+        "name_len_p50": 26.0,
+        "name_len_p95": 91.0,
+        "addr_len_mean": 53.72658471814564,
+        "addr_len_p50": 44.0,
+        "addr_len_p95": 105.0
+      },
+      "countries": [
+        {
+          "country": "India",
+          "count": 2312565
+        },
+        {
+          "country": "US",
+          "count": 1871330
+        },
+        {
+          "country": "France",
+          "count": 703378
+        }
+      ]
+    },
+    "source3": {
+      "row_count": 5082316,
+      "stats": {
+        "entity_id_null_count": 0,
+        "entity_id_unique_count": 5082316,
+        "business_name_null_count": 0,
+        "business_name_unique_count": 4521929,
+        "business_address_null_count": 136098,
+        "business_address_unique_count": 4456436,
+        "country_null_count": 0,
+        "country_unique_count": 3
+      },
+      "lengths": {
+        "name_len_mean": 29.11726681300415,
+        "name_len_p50": 26.0,
+        "name_len_p95": 64.0,
+        "addr_len_mean": 51.95100680964729,
+        "addr_len_p50": 45.0,
+        "addr_len_p95": 100.0
+      },
+      "countries": [
+        {
+          "country": "India",
+          "count": 2405000
+        },
+        {
+          "country": "US",
+          "count": 1945701
+        },
+        {
+          "country": "France",
+          "count": 731615
+        }
+      ]
+    }
+  },
+  "ground_truth": {
+    "total_s1": 2206821,
+    "distribution": [
+      {
+        "match_count": 1,
+        "len": 242404
+      },
+      {
+        "match_count": 2,
+        "len": 375212
+      },
+      {
+        "match_count": 3,
+        "len": 530841
+      },
+      {
+        "match_count": 4,
+        "len": 484115
+      },
+      {
+        "match_count": 5,
+        "len": 321957
+      },
+      {
+        "match_count": 6,
+        "len": 164868
+      },
+      {
+        "match_count": 7,
+        "len": 63968
+      },
+      {
+        "match_count": 8,
+        "len": 18680
+      },
+      {
+        "match_count": 9,
+        "len": 4205
+      },
+      {
+        "match_count": 10,
+        "len": 534
+      },
+      {
+        "match_count": 11,
+        "len": 37
+      }
+    ],
+    "mean_matches": 3.517100843249181,
+    "max_matches": 11
+  }
+}

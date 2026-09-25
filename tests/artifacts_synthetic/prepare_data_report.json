@@ -1,0 +1,16 @@
+{
+  "timestamp": "2026-09-25T12:53:54.520701",
+  "environment": "Local/Unknown",
+  "reports": [
+    {
+      "source": "train_source1",
+      "input_rows": 10,
+      "output_rows": 10,
+      "rows_dropped": 0,
+      "processing_time_sec": 0.13,
+      "throughput_rows_per_sec": 75.69,
+      "output_size_mb": 0.0,
+      "validation_passed": true
+    }
+  ]
+}

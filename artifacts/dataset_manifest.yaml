@@ -1,0 +1,38 @@
+analysis_timestamp: '2026-09-25T12:41:13.434357'
+dataset_version: '1.0'
+files:
+  test_source1:
+    path: data/student_resource/dataset/test/test_source1.tsv
+    sha256: 3d4a32c54c2ca9c53fd7c2be105bf26f708f94c4d2f88eb370972a195665c2f5
+    size_bytes: 175022086
+    status: exists
+  test_source2:
+    path: data/student_resource/dataset/test/test_source2.tsv
+    sha256: 79d906c7497af2ace70aa277f6e334a652094909de99bd6c57b53420b6a7b2dd
+    size_bytes: 509456422
+    status: exists
+  test_source3:
+    path: data/student_resource/dataset/test/test_source3.tsv
+    sha256: 850942b11d2a4343486ed0834e28bce9f3b385f3fd497fd60ccf4ea3b8bda035
+    size_bytes: 506002772
+    status: exists
+  train_ground_truth:
+    path: data/student_resource/dataset/train/train_ground_truth.tsv
+    sha256: 70bc1d8a16c667e0155c2105d0ab2ebe41d7e7a85d8a529e3ca81c6c3a5af037
+    size_bytes: 127015583
+    status: exists
+  train_source1:
+    path: data/student_resource/dataset/train/train_source1.tsv
+    sha256: 591af0e1dfeb65cab71ea6ee8cb69df00f92d6ba6fa79e05746c938775d14973
+    size_bytes: 210069713
+    status: exists
+  train_source2:
+    path: data/student_resource/dataset/train/train_source2.tsv
+    sha256: 6336c1a055eec79cf8a6d99fdc8d32a2e4d9dc2662e00963cb35d66b89ed09ed
+    size_bytes: 489301488
+    status: exists
+  train_source3:
+    path: data/student_resource/dataset/train/train_source3.tsv
+    sha256: 67da22f5151898ff3006febd836c1a159e97ae95efa7257a5aff4fda685e58e9
+    size_bytes: 503705637
+    status: exists
