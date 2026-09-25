@@ -1,3 +1,5 @@
 
 train:
   source1: "tests/synthetic_data/synthetic_source1.tsv"
+  source2: "tests/synthetic_data/synthetic_source2.tsv"
+  source3: "tests/synthetic_data/synthetic_source3.tsv"
