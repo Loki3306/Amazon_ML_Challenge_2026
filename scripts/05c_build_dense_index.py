@@ -49,8 +49,8 @@ def main():
     mapping_path = os.path.join(args.index_dir, "corpus_mapping.parquet")
     ckpt_path = os.path.join(args.index_dir, "checkpoint.json")
     
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = SentenceTransformer(args.model_name, device=device)
+    model = SentenceTransformer(args.model_name)
+    pool = model.start_multi_process_pool()
     dim = model.get_sentence_embedding_dimension()
     
     # Load checkpoint if exists
@@ -109,11 +109,15 @@ def main():
         chunk_texts = texts_series[offset:end_offset].to_list()
         
         t0 = time.time()
-        # Encode (normalize=True because we use Inner Product FAISS)
-        embeddings = model.encode(chunk_texts, batch_size=args.batch_size, show_progress_bar=False, convert_to_tensor=True, normalize_embeddings=True)
+        # Encode with multi-GPU
+        embeddings = model.encode_multi_process(chunk_texts, pool, batch_size=args.batch_size)
+        
+        # normalize embeddings for Inner Product search:
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        embeddings = embeddings / np.maximum(norms, 1e-12)
         
         # Cast to FP16 and save to memmap
-        emb_fp16 = embeddings.cpu().numpy().astype(np.float16)
+        emb_fp16 = embeddings.astype(np.float16)
         memmap_array[offset:end_offset] = emb_fp16
         
         # Flush to disk immediately
@@ -155,6 +159,8 @@ def main():
     print(f"\nCorpus Indexing Complete!")
     print(f"Saved {total_rows} embeddings to: {emb_path} (FP16 memmap)")
     print(f"Saved FAISS row mapping to: {mapping_path}")
+    
+    model.stop_multi_process_pool(pool)
 
 if __name__ == "__main__":
     main()
