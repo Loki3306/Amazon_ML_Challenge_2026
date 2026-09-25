@@ -16,6 +16,7 @@ def parse_args():
     parser.add_argument("--model-name", type=str, default="all-MiniLM-L6-v2", help="SentenceTransformer model")
     parser.add_argument("--top-k", type=int, default=10, help="Number of candidates to retrieve")
     parser.add_argument("--batch-size", type=int, default=2048, help="Batch size for query embedding")
+    parser.add_argument("--nprobe", type=int, default=32, help="Number of clusters to search (higher = slower but better recall)")
     return parser.parse_args()
 
 def main():
@@ -139,7 +140,8 @@ def main():
         
     # Set nprobe
     ps = faiss.GpuParameterSpace()
-    ps.set_index_parameter(search_index, "nprobe", 32)
+    ps.set_index_parameter(search_index, "nprobe", args.nprobe)
+    print(f"Set nprobe to {args.nprobe}.")
     
     print(f"Searching Top-{args.top_k} candidates across {total_corpus_rows} corpus...")
     t0 = time.time()
