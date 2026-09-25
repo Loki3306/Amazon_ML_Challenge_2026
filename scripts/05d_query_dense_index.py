@@ -162,6 +162,7 @@ def main():
     all_scores = []
     all_indices = []
     search_batch_size = 50000
+    num_queries = query_np.shape[0]
     
     for i in range(0, num_queries, search_batch_size):
         end_idx = min(i + search_batch_size, num_queries)
