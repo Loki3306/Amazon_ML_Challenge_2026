@@ -53,23 +53,33 @@ def main():
     query_ids = s1_df["entity_id"].to_list()
     del s1_df
     
-    print("Encoding Queries...")
-    t0 = time.time()
-    model = SentenceTransformer(args.model_name, device=device)
-    query_emb = model.encode(queries_text, batch_size=args.batch_size, show_progress_bar=True, convert_to_tensor=True, normalize_embeddings=True)
-    
-    if isinstance(query_emb, torch.Tensor):
-        query_np = query_emb.cpu().numpy().astype(np.float32)
+    query_emb_path = os.path.join(args.index_dir, "query_embeddings_fp32.npy")
+    if os.path.exists(query_emb_path):
+        print(f"Loading CACHED query embeddings from {query_emb_path} (Skipping 10-minute encoding!)")
+        t0 = time.time()
+        query_np = np.load(query_emb_path)
+        print(f"Loaded in {time.time()-t0:.1f}s.")
     else:
-        query_np = query_emb.astype(np.float32)
+        print("Encoding Queries...")
+        t0 = time.time()
+        model = SentenceTransformer(args.model_name, device=device)
+        query_emb = model.encode(queries_text, batch_size=args.batch_size, show_progress_bar=True, convert_to_tensor=True, normalize_embeddings=True)
         
-    print(f"Queries encoded in {time.time()-t0:.1f}s.")
-    
-    # Free the model and clear GPU cache completely!
-    del model
-    del query_emb
-    if device == "cuda":
-        torch.cuda.empty_cache()
+        if isinstance(query_emb, torch.Tensor):
+            query_np = query_emb.cpu().numpy().astype(np.float32)
+        else:
+            query_np = query_emb.astype(np.float32)
+            
+        print(f"Queries encoded in {time.time()-t0:.1f}s.")
+        print(f"Saving query embeddings to cache: {query_emb_path}")
+        np.save(query_emb_path, query_np)
+        
+        # Free the model and clear GPU cache completely!
+        del model
+        del query_emb
+        if device == "cuda":
+            torch.cuda.empty_cache()
+            
     gc.collect()
 
     # ---------------------------------------------------------
