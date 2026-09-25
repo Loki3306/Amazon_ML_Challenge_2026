@@ -1,0 +1,10 @@
+train:
+  source1: "/kaggle/input/datasets/lokeshgile/student-resource-amazonml/student_resource/dataset/train/train_source1.tsv"
+  source2: "/kaggle/input/datasets/lokeshgile/student-resource-amazonml/student_resource/dataset/train/train_source2.tsv"
+  source3: "/kaggle/input/datasets/lokeshgile/student-resource-amazonml/student_resource/dataset/train/train_source3.tsv"
+  ground_truth: "/kaggle/input/datasets/lokeshgile/student-resource-amazonml/student_resource/dataset/train/train_ground_truth.tsv"
+
+test:
+  source1: "/kaggle/input/datasets/lokeshgile/student-resource-amazonml/student_resource/dataset/test/test_source1.tsv"
+  source2: "/kaggle/input/datasets/lokeshgile/student-resource-amazonml/student_resource/dataset/test/test_source2.tsv"
+  source3: "/kaggle/input/datasets/lokeshgile/student-resource-amazonml/student_resource/dataset/test/test_source3.tsv"
