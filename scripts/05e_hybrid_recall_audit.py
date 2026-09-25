@@ -6,7 +6,7 @@ import json
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Phase 5E: Dense & Hybrid Recall Audit")
-    parser.add_argument("--data-dir", type=str, default="data/processed", help="Parquet directory")
+    parser.add_argument("--ground-truth", type=str, required=True, help="Path to train_ground_truth.tsv")
     parser.add_argument("--candidates-dir", type=str, default="data/candidates", help="Candidates directory")
     parser.add_argument("--k", type=int, default=10, help="The Top-K of the dense file to audit")
     return parser.parse_args()
@@ -62,14 +62,15 @@ def main():
     print("==================================================")
     
     # 1. Load Ground Truth
-    print("Loading Ground Truth...")
-    gt_path = os.path.join(args.data_dir, "train", "train_ground_truth.tsv")
-    # For robust parsing if it's TSV
-    if os.path.exists(gt_path):
-        gt_df = pl.read_csv(gt_path, separator='\t').rename({"source1_id": "query_id", "source2_id": "candidate_id"})
+    print(f"Loading Ground Truth from {args.ground_truth}...")
+    if not os.path.exists(args.ground_truth):
+        print(f"ERROR: Ground truth not found at {args.ground_truth}")
+        return
+        
+    if args.ground_truth.endswith('.parquet'):
+        gt_df = pl.read_parquet(args.ground_truth)
     else:
-        # Fallback to parquet if they converted it
-        gt_df = pl.read_parquet(os.path.join(args.data_dir, "train", "train_ground_truth.parquet"))
+        gt_df = pl.read_csv(args.ground_truth, separator='\t').rename({"source1_id": "query_id", "source2_id": "candidate_id"})
         
     # Standardize types
     gt_df = gt_df.with_columns([
