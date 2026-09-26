@@ -189,9 +189,8 @@ def main():
     submission_rows = []
     for q_id in all_query_ids:
         cands = matches_by_query.get(q_id, [])
-        # Space separated list of candidates
-        cands_str = " ".join(sorted(cands))
-        submission_rows.append({"source1_id": q_id, "predicted_match_ids": cands_str})
+        cands_str = ",".join(sorted(cands))
+        submission_rows.append({"source1_entity_id": q_id, "matched_entity_ids": cands_str})
         
     sub_df = pl.DataFrame(submission_rows)
     sub_df.write_csv(args.output_csv, separator="\t")
