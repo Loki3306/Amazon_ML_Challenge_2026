@@ -59,7 +59,7 @@ def compute_gpu_features(chunk: cudf.DataFrame) -> cudf.DataFrame:
     # Length diff
     chunk['name_len_diff'] = cp.abs(chunk['name_s1'].str.len() - chunk['name_cand'].str.len()).astype(cp.float32)
     
-    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff']
+    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'dense_score', 'dense_rank']
     out_cols = ['query_id', 'candidate_id'] + features
     if 'label' in chunk.columns:
         out_cols.append('label')
@@ -98,6 +98,12 @@ def main():
         # Read candidate pairs on CPU
         pairs = pl.read_parquet(p)
         
+        if "dense_score" not in pairs.columns:
+            pairs = pairs.with_columns([
+                pl.lit(999.0).cast(pl.Float32).alias("dense_score"),
+                pl.lit(1).cast(pl.Int32).alias("dense_rank")
+            ])
+            
         # Label on CPU instantly via join
         print("  Labeling on CPU via Polars join...")
         pairs = pairs.join(gt, on=['query_id', 'candidate_id'], how='left').with_columns(
