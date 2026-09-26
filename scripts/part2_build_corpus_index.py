@@ -7,6 +7,9 @@ Saves index (.index) to disk cache.
 """
 
 import os
+# Configure PyTorch CUDA Memory Allocator to prevent VRAM fragmentation
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import sys
 import time
 import gc
@@ -31,8 +34,8 @@ def parse_args():
     parser.add_argument("--cache-dir", type=str, default="/kaggle/working/reports/retrieval/cache")
     parser.add_argument("--model-name", type=str, default="all-MiniLM-L6-v2")
     parser.add_argument("--index-type", type=str, choices=["ivfflat", "ivfsq8"], default="ivfsq8")
-    parser.add_argument("--batch-size", type=int, default=8192)
-    parser.add_argument("--chunk-size", type=int, default=500000)
+    parser.add_argument("--batch-size", type=int, default=2048, help="Safe batch size to prevent PyTorch activation OOM")
+    parser.add_argument("--chunk-size", type=int, default=200000, help="Chunk size for streaming encoding")
     return parser.parse_args()
 
 
