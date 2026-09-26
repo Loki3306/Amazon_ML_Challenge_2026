@@ -692,6 +692,10 @@ def train_lightgbm(args, train_shards: list[str], val_shards: list[str]) -> dict
         "reg_alpha": 0.1, "reg_lambda": 0.1,
         "random_state": args.seed, "n_jobs": -1, "verbose": -1,
         "device": "cpu", # Force CPU to avoid GPU zero-variance bug
+        "feature_pre_filter": False,
+        "min_data_in_bin": 10,
+        "min_sum_hessian_in_leaf": 1e-3,
+        "max_bin": 255,
     }
 
     lgb_tr  = lgb.Dataset(X_tr,  label=y_tr,  feature_name=FEATURE_COLS,
