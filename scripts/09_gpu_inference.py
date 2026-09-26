@@ -55,10 +55,11 @@ def main():
             X_chunk = feat_df[features].to_pandas().values
             preds = model.predict(X_chunk)
             
-            sub_pdf['score'] = preds
-            all_preds.append(sub_pdf[sub_pdf['score'] > args.threshold])
+            res_pdf = feat_df[['query_id', 'candidate_id']].to_pandas()
+            res_pdf['score'] = preds
+            all_preds.append(res_pdf[res_pdf['score'] > args.threshold])
             
-            del df, feat_df
+            del df, feat_df, res_pdf
             gc.collect()
 
     final_preds = pd.concat(all_preds)
