@@ -119,6 +119,26 @@ def main():
     exact_pair_recall = round(exact_pair_hits / total_true_pairs * 100, 2)
     print(f"Exact Pair Recall Baseline: {exact_pair_recall:.2f}%")
 
+    # Pre-map Entity IDs to Integer Indices for 1800x faster set operations
+    print("Mapping entity IDs to integer indices for ultra-fast set evaluation...", flush=True)
+    t_map = time.time()
+    corpus_id_to_idx = {cid: idx for idx, cid in enumerate(corpus_ids)}
+
+    # Convert Ground Truth and Exact Matches to Integer Index Sets
+    gt_dict_idx = {}
+    for q_id, target_cids in gt_dict.items():
+        valid_indices = {corpus_id_to_idx[cid] for cid in target_cids if cid in corpus_id_to_idx}
+        if valid_indices:
+            gt_dict_idx[q_id] = valid_indices
+
+    exact_dict_idx = {}
+    for q_id, target_cids in exact_dict.items():
+        valid_indices = {corpus_id_to_idx[cid] for cid in target_cids if cid in corpus_id_to_idx}
+        if valid_indices:
+            exact_dict_idx[q_id] = valid_indices
+
+    print(f"Mapping complete in {time.time() - t_map:.2f}s.", flush=True)
+
     # Load Cached Embeddings & FAISS Index
     q_emb_path = os.path.join(args.cache_dir, "query_emb_name_address_country.npy")
     index_path = os.path.join(args.cache_dir, f"faiss_index_name_address_country_{args.index_type}.index")
@@ -126,29 +146,30 @@ def main():
     if not os.path.exists(q_emb_path) or not os.path.exists(index_path):
         raise FileNotFoundError("Query embeddings or FAISS index missing in cache! Please run Part 1 and Part 2 first.")
 
-    print(f"Loading cached query embeddings from {q_emb_path}...")
+    print(f"Loading cached query embeddings from {q_emb_path}...", flush=True)
     q_emb = np.load(q_emb_path)
 
-    print(f"Loading cached FAISS CPU index from {index_path}...")
+    print(f"Loading cached FAISS CPU index from {index_path}...", flush=True)
     index = faiss.read_index(index_path)
-    print(f"FAISS index loaded with {index.ntotal:,} vectors.")
+    print(f"FAISS index loaded with {index.ntotal:,} vectors.", flush=True)
 
     # 1. Nprobe Sweep (K=50)
-    print("\n" + "=" * 60)
-    print(f" STEP 1: NPROBE SWEEP (128, 256, 512, 1024 at K=50)")
-    print("=" * 60)
+    print("\n" + "=" * 60, flush=True)
+    print(f" STEP 1: NPROBE SWEEP (128, 256, 512, 1024 at K=50)", flush=True)
+    print("=" * 60, flush=True)
 
     nprobe_results = []
     for p in [128, 256, 512, 1024]:
         scores, indices, st = search_index_batched(index, q_emb, p, 50)
         d_hits, d_q_hits, h_hits, h_q_hits, h_cands = 0, 0, 0, 0, 0
 
+        t_eval = time.time()
         for i, q_id in enumerate(s1_ids):
-            if q_id not in gt_dict:
+            if q_id not in gt_dict_idx:
                 continue
-            true_set = gt_dict[q_id]
-            e_set = exact_dict.get(q_id, set())
-            d_set = set(corpus_ids[idx] for idx in indices[i])
+            true_set = gt_dict_idx[q_id]
+            e_set = exact_dict_idx.get(q_id, set())
+            d_set = set(indices[i])
             h_set = e_set | d_set
 
             dh = len(d_set & true_set)
@@ -161,6 +182,7 @@ def main():
                 h_q_hits += 1
             h_cands += len(h_set)
 
+        eval_time = time.time() - t_eval
         d_rec = round(d_hits / total_true_pairs * 100, 2)
         d_q_rec = round(d_q_hits / len(valid_queries) * 100, 2)
         h_rec = round(h_hits / total_true_pairs * 100, 2)
@@ -172,12 +194,12 @@ def main():
             "hybrid_pair_recall_%": h_rec, "hybrid_query_recall_%": h_q_rec, "avg_candidates": avg_cand, "search_time_sec": round(st, 2)
         }
         nprobe_results.append(res)
-        print(f"  nprobe={p:4d} | Dense Pair: {d_rec:6.2f}% | Hybrid Pair: {h_rec:6.2f}% | Hybrid Query: {h_q_rec:6.2f}% | Avg Cands: {avg_cand:6.2f} | Time: {st:.2f}s")
+        print(f"  nprobe={p:4d} | Dense Pair: {d_rec:6.2f}% | Hybrid Pair: {h_rec:6.2f}% | Hybrid Query: {h_q_rec:6.2f}% | Avg Cands: {avg_cand:6.2f} | Search: {st:.1f}s | Eval: {eval_time:.1f}s", flush=True)
 
     # 2. Top-K Sweep (nprobe=512)
-    print("\n" + "=" * 60)
-    print(f" STEP 2: TOP-K SWEEP (50, 100, 200, 300 at nprobe=512)")
-    print("=" * 60)
+    print("\n" + "=" * 60, flush=True)
+    print(f" STEP 2: TOP-K SWEEP (50, 100, 200, 300 at nprobe=512)", flush=True)
+    print("=" * 60, flush=True)
 
     best_p = 512
     scores_300, indices_300, st_300 = search_index_batched(index, q_emb, best_p, 300)
@@ -185,12 +207,13 @@ def main():
 
     for k in [50, 100, 200, 300]:
         d_hits, d_q_hits, h_hits, h_q_hits, h_cands = 0, 0, 0, 0, 0
+        t_eval = time.time()
         for i, q_id in enumerate(s1_ids):
-            if q_id not in gt_dict:
+            if q_id not in gt_dict_idx:
                 continue
-            true_set = gt_dict[q_id]
-            e_set = exact_dict.get(q_id, set())
-            d_set = set(corpus_ids[idx] for idx in indices_300[i, :k])
+            true_set = gt_dict_idx[q_id]
+            e_set = exact_dict_idx.get(q_id, set())
+            d_set = set(indices_300[i, :k])
             h_set = e_set | d_set
 
             dh = len(d_set & true_set)
@@ -203,6 +226,7 @@ def main():
                 h_q_hits += 1
             h_cands += len(h_set)
 
+        eval_time = time.time() - t_eval
         d_rec = round(d_hits / total_true_pairs * 100, 2)
         d_q_rec = round(d_q_hits / len(valid_queries) * 100, 2)
         h_rec = round(h_hits / total_true_pairs * 100, 2)
@@ -214,7 +238,7 @@ def main():
             "hybrid_pair_recall_%": h_rec, "hybrid_query_recall_%": h_q_rec, "avg_candidates": avg_cand
         }
         topk_results.append(res)
-        print(f"  K={k:3d} | Dense Pair: {d_rec:6.2f}% | Hybrid Pair: {h_rec:6.2f}% | Hybrid Query: {h_q_rec:6.2f}% | Avg Cands: {avg_cand:6.2f}")
+        print(f"  K={k:3d} | Dense Pair: {d_rec:6.2f}% | Hybrid Pair: {h_rec:6.2f}% | Hybrid Query: {h_q_rec:6.2f}% | Avg Cands: {avg_cand:6.2f} | Eval: {eval_time:.1f}s", flush=True)
 
     # Master Summary
     master_summary = {
@@ -226,10 +250,10 @@ def main():
     with open(summary_path, "w") as f:
         json.dump(master_summary, f, indent=2)
 
-    print("\n" + "=" * 70)
-    print(" RECALL EXPERIMENTS COMPLETED SUCCESSFULLY!")
-    print(f" Summary saved to: {summary_path}")
-    print("=" * 70)
+    print("\n" + "=" * 70, flush=True)
+    print(" RECALL EXPERIMENTS COMPLETED SUCCESSFULLY!", flush=True)
+    print(f" Summary saved to: {summary_path}", flush=True)
+    print("=" * 70, flush=True)
 
 
 if __name__ == "__main__":
