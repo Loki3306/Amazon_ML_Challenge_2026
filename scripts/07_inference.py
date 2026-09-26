@@ -62,16 +62,13 @@ def main():
     
     # 3. Process Sources
     sources = [
-        ("exact", os.path.join(args.candidates_dir, "test_exact_candidates.parquet")),
         ("bm25", os.path.join(args.candidates_dir, f"test_bm25_candidates_name_word_K{args.top_k}.parquet"))
     ]
     
     # Open a temporary CSV to stream predictions and avoid RAM OOMs
     temp_csv_path = os.path.join(args.output_csv + ".tmp")
     
-    # Clear temp file if it exists (for a fresh run)
-    if os.path.exists(temp_csv_path):
-        os.remove(temp_csv_path)
+    # Removed file clearing to allow resuming
         
     total_matches_found = 0
     total_candidates_processed = 0
