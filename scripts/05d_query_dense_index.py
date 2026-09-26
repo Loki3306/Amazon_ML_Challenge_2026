@@ -148,9 +148,8 @@ def main():
     del memmap_array
     gc.collect()
         
-    # Set nprobe
-    ps = faiss.GpuParameterSpace()
-    ps.set_index_parameter(search_index, "nprobe", args.nprobe)
+    # Set nprobe on CPU index
+    faiss.ParameterSpace().set_index_parameter(search_index, "nprobe", args.nprobe)
     print(f"Set nprobe to {args.nprobe}.")
     
     print(f"Searching Top-{args.top_k} candidates across {total_corpus_rows} corpus...")
