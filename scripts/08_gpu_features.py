@@ -56,10 +56,16 @@ def compute_gpu_features(chunk: cudf.DataFrame) -> cudf.DataFrame:
     addr_max_len = cp.maximum(addr_max_len, 1.0)
     chunk['addr_lev_sim'] = (1.0 - (addr_ed.astype(cp.float32) / addr_max_len)).astype(cp.float32)
     
-    # Length diff
-    chunk['name_len_diff'] = cp.abs(chunk['name_s1'].str.len() - chunk['name_cand'].str.len()).astype(cp.float32)
+    # Length ratios
+    chunk['name_len_ratio'] = (cp.minimum(chunk['name_s1'].str.len(), chunk['name_cand'].str.len()) / name_max_len).astype(cp.float32)
+    addr_max_len = cp.maximum(chunk['addr_s1'].str.len(), chunk['addr_cand'].str.len()).astype(cp.float32)
+    addr_max_len = cp.maximum(addr_max_len, 1.0)
+    chunk['addr_len_ratio'] = (cp.minimum(chunk['addr_s1'].str.len(), chunk['addr_cand'].str.len()) / addr_max_len).astype(cp.float32)
     
-    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score']
+    # First character match
+    chunk['name_first_char_match'] = (chunk['name_s1'].str.slice(0, 1) == chunk['name_cand'].str.slice(0, 1)).astype(cp.float32)
+    
+    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score', 'name_jaccard', 'addr_jaccard', 'name_len_ratio', 'addr_len_ratio', 'name_first_char_match']
     out_cols = ['query_id', 'candidate_id'] + features
     if 'label' in chunk.columns:
         out_cols.append('label')
@@ -86,7 +92,7 @@ def main():
     
     print(f"Found {len(train_shards)} candidate files.")
     
-    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score', 'name_jaccard', 'addr_jaccard']
+    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score', 'name_jaccard', 'addr_jaccard', 'name_len_ratio', 'addr_len_ratio', 'name_first_char_match']
     all_X = []
     all_y = []
     
@@ -135,7 +141,7 @@ def main():
             feat_df = compute_gpu_features(df)
             
             # Immediately extract to numpy arrays on CPU to free the huge strings from GPU memory
-            X_chunk_df = feat_df[['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score']].to_pandas()
+            X_chunk_df = feat_df[['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score', 'name_len_ratio', 'addr_len_ratio', 'name_first_char_match']].to_pandas()
             
             # Compute Jaccard on CPU (Python loop is very fast for 500k rows)
             name_s1 = feat_df['name_s1'].to_pandas()

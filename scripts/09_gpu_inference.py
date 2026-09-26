@@ -22,7 +22,7 @@ def main():
 
     print(f"Loading Model for split: {args.split}...")
     model = lgb.Booster(model_file="data/models/model_gpu.txt")
-    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score', 'name_jaccard', 'addr_jaccard']
+    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score', 'name_jaccard', 'addr_jaccard', 'name_len_ratio', 'addr_len_ratio', 'name_first_char_match']
 
     data_dir = f"data/processed/{args.split}"
     s1_df = cudf.read_parquet(os.path.join(data_dir, f"{args.split}_source1.parquet"))
@@ -56,7 +56,7 @@ def main():
             df = df.merge(cand_df, on='candidate_id', how='inner')
             
             feat_df = gpu_feat.compute_gpu_features(df)
-            X_chunk_df = feat_df[['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score']].to_pandas()
+            X_chunk_df = feat_df[['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score', 'name_len_ratio', 'addr_len_ratio', 'name_first_char_match']].to_pandas()
             
             name_s1 = feat_df['name_s1'].to_pandas()
             name_cand = feat_df['name_cand'].to_pandas()
