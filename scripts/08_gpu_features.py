@@ -83,7 +83,10 @@ def main():
     
     print(f"Found {len(train_shards)} candidate files.")
     
-    all_features = []
+    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff']
+    all_X = []
+    all_y = []
+    
     for p in train_shards:
         print(f"Processing {p} on CPU first to prevent GPU OOM...")
         import polars as pl
@@ -112,24 +115,34 @@ def main():
         sampled_pdf = sampled.to_pandas()
         del pos, neg, pairs, sampled; gc.collect()
         
-        print("  Transferring downsampled data to GPU and merging...")
-        df = cudf.DataFrame(sampled_pdf)
-        df = df.merge(s1_df, on='query_id', how='inner')
-        df = df.merge(cand_df, on='candidate_id', how='inner')
-        
-        feat_df = compute_gpu_features(df)
-        all_features.append(feat_df)
-        
-        del df, sampled_pdf
+        print("  Transferring to GPU in chunks to preserve VRAM...")
+        chunk_size = 500_000
+        for i in range(0, len(sampled_pdf), chunk_size):
+            print(f"    GPU Chunk {i//chunk_size + 1}/{len(sampled_pdf)//chunk_size + 1}...")
+            sub_pdf = sampled_pdf.iloc[i:i+chunk_size]
+            df = cudf.DataFrame(sub_pdf)
+            df = df.merge(s1_df, on='query_id', how='inner')
+            df = df.merge(cand_df, on='candidate_id', how='inner')
+            
+            feat_df = compute_gpu_features(df)
+            
+            # Immediately extract to numpy arrays on CPU to free the huge strings from GPU memory
+            X_chunk = feat_df[features].to_pandas().values
+            y_chunk = feat_df['label'].to_pandas().values
+            all_X.append(X_chunk)
+            all_y.append(y_chunk)
+            
+            del df, feat_df, sub_pdf
+            gc.collect()
+            
+        del sampled_pdf
         gc.collect()
         
-    print("Concatenating all features...")
-    final_df = cudf.concat(all_features)
-    del all_features; gc.collect()
-    
-    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff']
-    X = final_df[features].to_pandas().values
-    y = final_df['label'].to_pandas().values
+    print("Concatenating all chunks...")
+    import numpy as np
+    X = np.vstack(all_X)
+    y = np.concatenate(all_y)
+    del all_X, all_y; gc.collect()
     
     print("Training LightGBM on GPU...")
     params = {
