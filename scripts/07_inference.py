@@ -62,7 +62,6 @@ def main():
     
     # 3. Process Sources
     sources = [
-        ("dense", os.path.join(args.candidates_dir, f"test_dense_candidates_K{args.top_k}.parquet")),
         ("exact", os.path.join(args.candidates_dir, "test_exact_candidates.parquet")),
         ("bm25", os.path.join(args.candidates_dir, f"test_bm25_candidates_name_word_K{args.top_k}.parquet"))
     ]
