@@ -57,6 +57,7 @@ def parse_args():
     parser.add_argument("--output-dir", type=str, default="/kaggle/working/reports/retrieval", help="Output reports folder")
     parser.add_argument("--cache-dir", type=str, default="/kaggle/working/reports/retrieval/cache", help="Disk checkpoint cache folder")
     parser.add_argument("--model-name", type=str, default="all-MiniLM-L6-v2", help="SentenceTransformer model")
+    parser.add_argument("--index-type", type=str, choices=["ivfflat", "ivfsq8"], default="ivfsq8", help="FAISS CPU index type: 'ivfflat' (FP32) or 'ivfsq8' (8-bit Scalar Quantization)")
     parser.add_argument("--n-queries", type=int, default=0, help="0 for full scale, >0 for subset benchmarking")
     parser.add_argument("--n-corpus", type=int, default=0, help="0 for full scale, >0 for subset benchmarking")
     parser.add_argument("--batch-size", type=int, default=2048, help="Batch size for model encoding")
@@ -88,7 +89,11 @@ def get_model_dim(model) -> int:
 
 
 def encode_texts_chunked(model, texts: list[str], batch_size: int = 2048, chunk_size: int = 200000) -> np.ndarray:
-    """Encodes texts in chunks to prevent PyTorch CUDA OOM. Memory stays bounded to 1 batch."""
+    """
+    MEMORY-SAFE EMBEDDING ENCODER:
+    Encodes texts in chunks on GPU, moving each chunk to CPU immediately.
+    Keeps CUDA VRAM memory usage strictly bounded to 1 batch (2048 texts).
+    """
     n = len(texts)
     dim = get_model_dim(model)
     embeddings = np.empty((n, dim), dtype=np.float32)
@@ -132,20 +137,36 @@ def get_cached_query_embeddings(cache_dir: str, rep: str, model_supplier, s1_df:
     return arr
 
 
-def get_cached_faiss_index(cache_dir: str, rep: str, model_supplier, c_texts: list[str], nlist_target: int = 16384, chunk_size: int = 200000, batch_size: int = 2048):
+def get_cached_faiss_index(
+    cache_dir: str,
+    rep: str,
+    model_supplier,
+    c_texts: list[str],
+    index_type: str = "ivfsq8",
+    nlist_target: int = 16384,
+    chunk_size: int = 200000,
+    batch_size: int = 2048
+):
+    """
+    MEMORY-SAFE FAISS CPU BUILDER & POPULATOR:
+    1. Trains FAISS index on CPU system RAM using a sample of 1M corpus embeddings.
+    2. Streams remaining corpus vectors into the CPU FAISS index chunk by chunk.
+    3. GPU VRAM is never overloaded because embeddings are added directly to CPU index.
+    4. Supports 'ivfsq8' (8-bit quantization: ~3.84GB index for 10.3M) or 'ivfflat' (~14.9GB index).
+    """
     os.makedirs(cache_dir, exist_ok=True)
-    index_path = os.path.join(cache_dir, f"faiss_index_{rep}.index")
+    index_path = os.path.join(cache_dir, f"faiss_index_{rep}_{index_type}.index")
     total_corpus = len(c_texts)
     effective_nlist = min(nlist_target, max(16, total_corpus // 10))
 
     if os.path.exists(index_path):
-        print(f"  [CACHE HIT] Loading FAISS index for '{rep}' from {index_path}...", flush=True)
+        print(f"  [CACHE HIT] Loading FAISS CPU ({index_type.upper()}) index for '{rep}' from {index_path}...", flush=True)
         t0 = time.time()
         index = faiss.read_index(index_path)
         print(f"  Loaded FAISS CPU index with {index.ntotal:,} vectors in {time.time()-t0:.2f}s.", flush=True)
         return index, effective_nlist
 
-    print(f"  [CACHE MISS] Building & populating FAISS CPU index for '{rep}'...", flush=True)
+    print(f"  [CACHE MISS] Building & populating FAISS CPU ({index_type.upper()}) index for '{rep}'...", flush=True)
     model = model_supplier()
     dim = get_model_dim(model)
 
@@ -153,9 +174,13 @@ def get_cached_faiss_index(cache_dir: str, rep: str, model_supplier, c_texts: li
     train_sample_texts = c_texts[:min(1000000, total_corpus)]
     train_sample = encode_texts_chunked(model, train_sample_texts, batch_size=batch_size, chunk_size=chunk_size)
 
-    print(f"  Training FAISS CPU IVFFlat Index (nlist={effective_nlist}, dim={dim})...", flush=True)
     quantizer = faiss.IndexFlatIP(dim)
-    cpu_index = faiss.IndexIVFFlat(quantizer, dim, effective_nlist, faiss.METRIC_INNER_PRODUCT)
+    if index_type.lower() == "ivfsq8":
+        print(f"  Training FAISS CPU IndexIVFSQ8 (8-bit Scalar Quantization, nlist={effective_nlist}, dim={dim})...", flush=True)
+        cpu_index = faiss.IndexIVFScalarQuantizer(quantizer, dim, effective_nlist, faiss.ScalarQuantizer.QT_8bit, faiss.METRIC_INNER_PRODUCT)
+    else:
+        print(f"  Training FAISS CPU IndexIVFFlat (Uncompressed FP32, nlist={effective_nlist}, dim={dim})...", flush=True)
+        cpu_index = faiss.IndexIVFFlat(quantizer, dim, effective_nlist, faiss.METRIC_INNER_PRODUCT)
 
     faiss.omp_set_num_threads(os.cpu_count() or 4)
     cpu_index.train(train_sample)
@@ -352,14 +377,18 @@ def main():
     
     q_emb_primary = get_cached_query_embeddings(args.cache_dir, rep_primary, get_model, s1_df, args.batch_size, args.chunk_size)
     nlist_val = 16384 if len(corpus_ids) >= 500000 else max(16, len(corpus_ids) // 10)
-    index_primary, effective_nlist = get_cached_faiss_index(args.cache_dir, rep_primary, get_model, c_texts_primary, nlist_target=nlist_val, chunk_size=args.chunk_size, batch_size=args.batch_size)
+    index_primary, effective_nlist = get_cached_faiss_index(
+        args.cache_dir, rep_primary, get_model, c_texts_primary,
+        index_type=args.index_type, nlist_target=nlist_val,
+        chunk_size=args.chunk_size, batch_size=args.batch_size
+    )
 
     # ---------------------------------------------------------
     # STEP 1: NPROBE SWEEP (Top-K=50)
     # ---------------------------------------------------------
-    print("\n" + "="*65)
-    print(" STEP 1: NPROBE SWEEP (128, 256, 512, 1024 at K=50)")
-    print("="*65)
+    print("\n" + "="*75)
+    print(f" STEP 1: NPROBE SWEEP (128, 256, 512, 1024 at K=50) | Index: CPU {args.index_type.upper()}")
+    print("="*75)
 
     nprobe_results = []
     nprobes = [128, 256, 512, 1024]
@@ -369,7 +398,7 @@ def main():
             continue
         scores, indices, search_time = search_ivfflat_index_batched(index_primary, q_emb_primary, effective_nlist, p, 50)
 
-        d_hits, h_hits, h_cands = 0, 0, 0
+        d_hits, d_q_hits, h_hits, h_q_hits, h_cands = 0, 0, 0, 0, 0
         for i, q_id in enumerate(s1_ids):
             if q_id not in gt_dict:
                 continue
@@ -378,24 +407,36 @@ def main():
             d_set = set(corpus_ids[idx] for idx in indices[i])
             h_set = e_set.union(d_set)
 
-            d_hits += len(d_set.intersection(true_set))
-            h_hits += len(h_set.intersection(true_set))
+            dh = len(d_set.intersection(true_set))
+            hh = len(h_set.intersection(true_set))
+
+            d_hits += dh
+            h_hits += hh
+            if dh > 0:
+                d_q_hits += 1
+            if hh > 0:
+                h_q_hits += 1
             h_cands += len(h_set)
 
         d_rec = round(d_hits / total_true_pairs * 100, 2)
+        d_q_rec = round(d_q_hits / len(valid_queries) * 100, 2)
         h_rec = round(h_hits / total_true_pairs * 100, 2)
+        h_q_rec = round(h_q_hits / len(valid_queries) * 100, 2)
         avg_cand = round(h_cands / len(valid_queries), 2)
 
         res_item = {
             "nprobe": p,
             "top_k": 50,
             "dense_pair_recall_%": d_rec,
+            "dense_query_recall_%": d_q_rec,
             "hybrid_pair_recall_%": h_rec,
+            "hybrid_query_recall_%": h_q_rec,
             "avg_candidates_per_query": avg_cand,
+            "total_candidates": h_cands,
             "search_time_sec": round(search_time, 2)
         }
         nprobe_results.append(res_item)
-        print(f"  nprobe={p:4d} | Dense Recall: {d_rec:6.2f}% | Hybrid Recall: {h_rec:6.2f}% | Avg Cands: {avg_cand:6.2f} | Time: {search_time:.2f}s", flush=True)
+        print(f"  nprobe={p:4d} | Dense Pair: {d_rec:6.2f}% | Hybrid Pair: {h_rec:6.2f}% | Hybrid Query: {h_q_rec:6.2f}% | Avg Cands: {avg_cand:6.2f} | Time: {search_time:.2f}s", flush=True)
 
     with open(os.path.join(args.output_dir, "kaggle_step1_nprobe_sweep.json"), "w") as f:
         json.dump(nprobe_results, f, indent=2)
@@ -403,17 +444,16 @@ def main():
     # ---------------------------------------------------------
     # STEP 3: TOP-K SWEEP (at nprobe=512)
     # ---------------------------------------------------------
-    print("\n" + "="*65)
-    print(" STEP 3: TOP-K SWEEP (50, 100, 200, 300 at nprobe=512)")
-    print("="*65)
+    print("\n" + "="*75)
+    print(f" STEP 3: TOP-K SWEEP (50, 100, 200, 300 at nprobe=512) | Index: CPU {args.index_type.upper()}")
+    print("="*75)
 
     best_p = min(512, effective_nlist)
     scores_300, indices_300, search_t_300 = search_ivfflat_index_batched(index_primary, q_emb_primary, effective_nlist, best_p, 300)
 
     topk_results = []
     for k in [50, 100, 200, 300]:
-        h_hits, h_cands = 0, 0
-        d_hits = 0
+        d_hits, d_q_hits, h_hits, h_q_hits, h_cands = 0, 0, 0, 0, 0
         for i, q_id in enumerate(s1_ids):
             if q_id not in gt_dict:
                 continue
@@ -421,17 +461,36 @@ def main():
             e_set = exact_dict.get(q_id, set())
             d_set = set(corpus_ids[idx] for idx in indices_300[i, :k])
             h_set = e_set.union(d_set)
-            d_hits += len(d_set.intersection(true_set))
-            h_hits += len(h_set.intersection(true_set))
+
+            dh = len(d_set.intersection(true_set))
+            hh = len(h_set.intersection(true_set))
+
+            d_hits += dh
+            h_hits += hh
+            if dh > 0:
+                d_q_hits += 1
+            if hh > 0:
+                h_q_hits += 1
             h_cands += len(h_set)
 
         d_rec = round(d_hits / total_true_pairs * 100, 2)
+        d_q_rec = round(d_q_hits / len(valid_queries) * 100, 2)
         h_rec = round(h_hits / total_true_pairs * 100, 2)
+        h_q_rec = round(h_q_hits / len(valid_queries) * 100, 2)
         avg_cand = round(h_cands / len(valid_queries), 2)
 
-        item = {"K": k, "nprobe": best_p, "dense_pair_recall_%": d_rec, "hybrid_pair_recall_%": h_rec, "avg_candidates_per_query": avg_cand}
+        item = {
+            "K": k,
+            "nprobe": best_p,
+            "dense_pair_recall_%": d_rec,
+            "dense_query_recall_%": d_q_rec,
+            "hybrid_pair_recall_%": h_rec,
+            "hybrid_query_recall_%": h_q_rec,
+            "avg_candidates_per_query": avg_cand,
+            "total_candidates": h_cands
+        }
         topk_results.append(item)
-        print(f"  K={k:3d} | Dense Recall: {d_rec:6.2f}% | Hybrid Recall: {h_rec:6.2f}% | Avg Cands/S1: {avg_cand:6.2f}", flush=True)
+        print(f"  K={k:3d} | Dense Pair: {d_rec:6.2f}% | Hybrid Pair: {h_rec:6.2f}% | Hybrid Query: {h_q_rec:6.2f}% | Avg Cands/S1: {avg_cand:6.2f}", flush=True)
 
     with open(os.path.join(args.output_dir, "kaggle_step3_topk_sweep.json"), "w") as f:
         json.dump(topk_results, f, indent=2)
@@ -440,9 +499,9 @@ def main():
     # STEP 5: DENSE REPRESENTATION COMPARISON (nprobe=512, K=50)
     # Compares: name_address_country vs name_country vs name_address
     # ---------------------------------------------------------
-    print("\n" + "="*65)
+    print("\n" + "="*75)
     print(" STEP 5: DENSE REPRESENTATION SWEEP (at nprobe=512, K=50)")
-    print("="*65)
+    print("="*75)
 
     representations = ["name_address_country", "name_country", "name_address"]
     rep_results = {}
@@ -453,13 +512,17 @@ def main():
         c_texts_r = prepare_text(corpus_df, rep)
 
         q_emb_r = get_cached_query_embeddings(args.cache_dir, rep, get_model, s1_df, args.batch_size, args.chunk_size)
-        idx_r, eff_r = get_cached_faiss_index(args.cache_dir, rep, get_model, c_texts_r, nlist_target=nlist_val, chunk_size=args.chunk_size, batch_size=args.batch_size)
+        idx_r, eff_r = get_cached_faiss_index(
+            args.cache_dir, rep, get_model, c_texts_r,
+            index_type=args.index_type, nlist_target=nlist_val,
+            chunk_size=args.chunk_size, batch_size=args.batch_size
+        )
 
         target_p = min(512, eff_r)
         sc_r, ind_r, st_r = search_ivfflat_index_batched(idx_r, q_emb_r, eff_r, target_p, 50)
         rep_indices_dict[rep] = ind_r
 
-        d_hits, h_hits, h_cands = 0, 0, 0
+        d_hits, d_q_hits, h_hits, h_q_hits, h_cands = 0, 0, 0, 0, 0
         for i, q_id in enumerate(s1_ids):
             if q_id not in gt_dict:
                 continue
@@ -467,12 +530,22 @@ def main():
             e_set = exact_dict.get(q_id, set())
             d_set = set(corpus_ids[idx] for idx in ind_r[i])
             h_set = e_set.union(d_set)
-            d_hits += len(d_set.intersection(true_set))
-            h_hits += len(h_set.intersection(true_set))
+
+            dh = len(d_set.intersection(true_set))
+            hh = len(h_set.intersection(true_set))
+
+            d_hits += dh
+            h_hits += hh
+            if dh > 0:
+                d_q_hits += 1
+            if hh > 0:
+                h_q_hits += 1
             h_cands += len(h_set)
 
         d_rec = round(d_hits / total_true_pairs * 100, 2)
+        d_q_rec = round(d_q_hits / len(valid_queries) * 100, 2)
         h_rec = round(h_hits / total_true_pairs * 100, 2)
+        h_q_rec = round(h_q_hits / len(valid_queries) * 100, 2)
         avg_cand = round(h_cands / len(valid_queries), 2)
 
         rep_results[rep] = {
@@ -480,11 +553,13 @@ def main():
             "nprobe": target_p,
             "top_k": 50,
             "dense_pair_recall_%": d_rec,
+            "dense_query_recall_%": d_q_rec,
             "hybrid_pair_recall_%": h_rec,
+            "hybrid_query_recall_%": h_q_rec,
             "avg_candidates_per_query": avg_cand,
             "search_time_sec": round(st_r, 2)
         }
-        print(f"  [{rep:25s}] Dense Recall: {d_rec:6.2f}% | Hybrid Recall: {h_rec:6.2f}% | Avg Cands: {avg_cand:6.2f} | Time: {st_r:.2f}s", flush=True)
+        print(f"  [{rep:25s}] Dense Pair: {d_rec:6.2f}% | Hybrid Pair: {h_rec:6.2f}% | Hybrid Query: {h_q_rec:6.2f}% | Avg Cands: {avg_cand:6.2f} | Time: {st_r:.2f}s", flush=True)
 
     with open(os.path.join(args.output_dir, "kaggle_step5_representation_sweep.json"), "w") as f:
         json.dump(rep_results, f, indent=2)
