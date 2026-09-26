@@ -92,7 +92,21 @@ def main():
         
         num_chunks = (total_rows + args.chunk_size - 1) // args.chunk_size
         
+        # Checkpoint state
+        manifest_path = os.path.join(args.candidates_dir, "inference_manifest.json")
+        import json
+        if os.path.exists(manifest_path):
+            with open(manifest_path, "r") as f:
+                manifest = json.load(f)
+        else:
+            manifest = {}
+
         for i in range(num_chunks):
+            chunk_key = f"{source_name}_{i}"
+            if chunk_key in manifest:
+                print(f"  Skipping {chunk_key} (already completed)")
+                continue
+
             start_idx = i * args.chunk_size
             chunk = lazy_cands.slice(start_idx, args.chunk_size).collect()
             
@@ -169,6 +183,11 @@ def main():
                 with open(temp_csv_path, "a") as f:
                     for idx in match_indices:
                         f.write(f"{query_ids[idx]},{cand_ids[idx]}\n")
+            
+            # Save to manifest
+            manifest[chunk_key] = True
+            with open(manifest_path, "w") as f:
+                json.dump(manifest, f)
             
             total_matches_found += len(match_indices)
             speed = chunk_size / (time.perf_counter() - t_chunk)
