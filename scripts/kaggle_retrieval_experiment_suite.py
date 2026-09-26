@@ -33,7 +33,15 @@ from datetime import datetime
 
 import torch
 from sentence_transformers import SentenceTransformer
-import faiss
+
+try:
+    import faiss
+except ImportError:
+    print("FAISS not found. Auto-installing faiss-cpu...", flush=True)
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "faiss-cpu"])
+    import faiss
+
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
