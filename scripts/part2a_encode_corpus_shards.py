@@ -148,15 +148,21 @@ def main():
     print(f"Shard size: {shard_size:,} texts per shard ({args.n_shards} shards total)")
 
     # Check which shards are already done (disk checkpoint)
+    # A shard is "done" if either:
+    #   (a) the .npy file exists on disk, OR
+    #   (b) a .done sentinel file exists (part2b consumed+deleted the .npy already)
     shards_needed = []
     for s in range(args.n_shards):
         shard_path = os.path.join(args.cache_dir, f"corpus_shard_{s:02d}.npy")
+        done_path  = os.path.join(args.cache_dir, f"corpus_shard_{s:02d}.done")
         start = s * shard_size
         end = min(start + shard_size, total)
         if start >= total:
             break
         if os.path.exists(shard_path):
-            print(f"  [SKIP] Shard {s:02d} already exists ({start:,}–{end:,})")
+            print(f"  [SKIP] Shard {s:02d} .npy exists on disk ({start:,}–{end:,})")
+        elif os.path.exists(done_path):
+            print(f"  [SKIP] Shard {s:02d} already consumed by part2b (.done sentinel found)")
         else:
             shards_needed.append((s, start, end, shard_path))
 
