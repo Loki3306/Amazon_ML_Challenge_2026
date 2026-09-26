@@ -144,11 +144,12 @@ def main():
     y = np.concatenate(all_y)
     del all_X, all_y; gc.collect()
     
-    print("Training LightGBM on GPU...")
+    print("Training LightGBM on CPU...")
     params = {
         "objective": "binary", "metric": "auc",
         "boosting_type": "gbdt", "learning_rate": 0.05,
-        "n_estimators": 100, "device": "gpu"
+        "n_estimators": 100, "device": "cpu",
+        "num_threads": 4
     }
     
     lgb_tr = lgb.Dataset(X, label=y, feature_name=features)
