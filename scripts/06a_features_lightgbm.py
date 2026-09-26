@@ -744,7 +744,7 @@ def train_lightgbm(args, train_shards: list[str], val_shards: list[str]) -> dict
         n_neg_tr += len(neg)
         train_parts.append(pl.concat([pos, neg]))
         del df, pos, neg
-    train_df = pl.concat(train_parts).sample(fraction=1.0, shuffle=True, seed=args.seed)
+    train_df = pl.concat(train_parts)
     del train_parts; gc.collect()
     log.info("  Train rows: %d  (pos=%d  neg=%d)  RAM=%.1fGB",
              train_df.height, n_pos_tr, n_neg_tr, ram_gb())
