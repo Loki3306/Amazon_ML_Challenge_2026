@@ -240,12 +240,13 @@ class TokenIndex:
 
 
 def fast_paired_sim(s1_list, cand_list, scorer) -> np.ndarray:
-    return np.array(list(map(scorer, s1_list, cand_list)), dtype=np.float32)
+    # Truncate to 256 chars to avoid O(N^2) hangs on 100kb outlier strings
+    return np.array([scorer(a[:256], b[:256]) for a,b in zip(s1_list, cand_list)], dtype=np.float32)
 
 def fast_token_jaccard(s1_list, cand_list) -> np.ndarray:
     def get_token_sets(strings):
         unique_strs = set(strings)
-        str_to_set = {s: frozenset(s.split()) for s in unique_strs}
+        str_to_set = {s: frozenset(s[:256].split()) for s in unique_strs}
         return [str_to_set[s] for s in strings]
         
     s1_sets = get_token_sets(s1_list)
@@ -260,10 +261,10 @@ def fast_token_jaccard(s1_list, cand_list) -> np.ndarray:
     return np.array(list(map(jaccard, s1_sets, cand_sets)), dtype=np.float32)
 
 def fast_fuzz_set(s1_list, cand_list) -> np.ndarray:
-    return np.array([fuzz.token_set_ratio(a,b) for a,b in zip(s1_list, cand_list)], dtype=np.float32) / 100.0
+    return np.array([fuzz.token_set_ratio(a[:256], b[:256]) for a,b in zip(s1_list, cand_list)], dtype=np.float32) / 100.0
 
 def fast_fuzz_sort(s1_list, cand_list) -> np.ndarray:
-    return np.array([fuzz.token_sort_ratio(a,b) for a,b in zip(s1_list, cand_list)], dtype=np.float32) / 100.0
+    return np.array([fuzz.token_sort_ratio(a[:256], b[:256]) for a,b in zip(s1_list, cand_list)], dtype=np.float32) / 100.0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
