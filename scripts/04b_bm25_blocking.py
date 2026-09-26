@@ -266,17 +266,35 @@ def main():
     del query_matrix, corpus_matrix_T
     gc.collect()
 
-    corpus_ids_np = np.array(corpus_ids)
-    corpus_sources_np = np.array(corpus_sources)
-    query_ids_np = np.array(query_ids)
-
+    print("Building raw results dataframe...")
     out_df = pl.DataFrame({
-        "query_id": query_ids_np[row_idxs],
-        "candidate_id": corpus_ids_np[col_idxs],
-        "candidate_source": corpus_sources_np[col_idxs],
+        "q_idx": row_idxs,
+        "c_idx": col_idxs,
         "bm25_score": scores,
         "found_by_bm25": True
     })
+    del row_idxs, col_idxs, scores
+    gc.collect()
+    
+    print("Joining query IDs...")
+    q_df = pl.DataFrame({
+        "q_idx": np.arange(len(query_ids), dtype=np.int32),
+        "query_id": query_ids
+    })
+    out_df = out_df.join(q_df, on="q_idx", how="left").drop("q_idx")
+    del q_df, query_ids
+    gc.collect()
+
+    print("Joining corpus IDs...")
+    c_df = pl.DataFrame({
+        "c_idx": np.arange(len(corpus_ids), dtype=np.int32),
+        "candidate_id": corpus_ids,
+        "candidate_source": corpus_sources
+    })
+    out_df = out_df.join(c_df, on="c_idx", how="left").drop("c_idx")
+    del c_df, corpus_ids, corpus_sources
+    gc.collect()
+
     out_df = out_df.filter(pl.col("query_id") != pl.col("candidate_id"))
 
     output_path = os.path.join(args.output_dir, f"{args.split}_bm25_candidates_{config_name}.parquet")
