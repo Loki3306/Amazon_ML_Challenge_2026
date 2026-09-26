@@ -86,7 +86,7 @@ def main():
     
     print(f"Found {len(train_shards)} candidate files.")
     
-    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score']
+    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score', 'name_jaccard', 'addr_jaccard']
     all_X = []
     all_y = []
     
@@ -135,7 +135,25 @@ def main():
             feat_df = compute_gpu_features(df)
             
             # Immediately extract to numpy arrays on CPU to free the huge strings from GPU memory
-            X_chunk = feat_df[features].to_pandas().values
+            X_chunk_df = feat_df[['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score']].to_pandas()
+            
+            # Compute Jaccard on CPU (Python loop is very fast for 500k rows)
+            name_s1 = feat_df['name_s1'].to_pandas()
+            name_cand = feat_df['name_cand'].to_pandas()
+            addr_s1 = feat_df['addr_s1'].to_pandas()
+            addr_cand = feat_df['addr_cand'].to_pandas()
+            
+            def jaccard_list(l1, l2):
+                res = []
+                for a, b in zip(l1, l2):
+                    sa, sb = set(str(a).split()), set(str(b).split())
+                    res.append(len(sa & sb) / len(sa | sb) if sa and sb else 0.0)
+                return res
+                
+            X_chunk_df['name_jaccard'] = jaccard_list(name_s1, name_cand)
+            X_chunk_df['addr_jaccard'] = jaccard_list(addr_s1, addr_cand)
+            
+            X_chunk = X_chunk_df[features].values
             y_chunk = feat_df['label'].to_pandas().values
             all_X.append(X_chunk)
             all_y.append(y_chunk)

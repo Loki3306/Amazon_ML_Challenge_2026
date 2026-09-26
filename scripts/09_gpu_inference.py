@@ -22,7 +22,7 @@ def main():
 
     print(f"Loading Model for split: {args.split}...")
     model = lgb.Booster(model_file="data/models/model_gpu.txt")
-    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score']
+    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score', 'name_jaccard', 'addr_jaccard']
 
     data_dir = f"data/processed/{args.split}"
     s1_df = cudf.read_parquet(os.path.join(data_dir, f"{args.split}_source1.parquet"))
@@ -56,7 +56,24 @@ def main():
             df = df.merge(cand_df, on='candidate_id', how='inner')
             
             feat_df = gpu_feat.compute_gpu_features(df)
-            X_chunk = feat_df[features].to_pandas().values
+            X_chunk_df = feat_df[['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score']].to_pandas()
+            
+            name_s1 = feat_df['name_s1'].to_pandas()
+            name_cand = feat_df['name_cand'].to_pandas()
+            addr_s1 = feat_df['addr_s1'].to_pandas()
+            addr_cand = feat_df['addr_cand'].to_pandas()
+            
+            def jaccard_list(l1, l2):
+                res = []
+                for a, b in zip(l1, l2):
+                    sa, sb = set(str(a).split()), set(str(b).split())
+                    res.append(len(sa & sb) / len(sa | sb) if sa and sb else 0.0)
+                return res
+                
+            X_chunk_df['name_jaccard'] = jaccard_list(name_s1, name_cand)
+            X_chunk_df['addr_jaccard'] = jaccard_list(addr_s1, addr_cand)
+            
+            X_chunk = X_chunk_df[features].values
             preds = model.predict(X_chunk)
             
             res_pdf = feat_df[['query_id', 'candidate_id']].to_pandas()
