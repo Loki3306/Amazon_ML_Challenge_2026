@@ -22,7 +22,7 @@ def main():
 
     print(f"Loading Model for split: {args.split}...")
     model = lgb.Booster(model_file="data/models/model_gpu.txt")
-    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'dense_score', 'dense_rank']
+    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'bm25_score']
 
     data_dir = f"data/processed/{args.split}"
     s1_df = cudf.read_parquet(os.path.join(data_dir, f"{args.split}_source1.parquet"))
@@ -44,9 +44,8 @@ def main():
         print(f"Scoring {p}...")
         pairs = pd.read_parquet(p)
         
-        if "dense_score" not in pairs.columns:
-            pairs["dense_score"] = 999.0
-            pairs["dense_rank"] = 1
+        if "bm25_score" not in pairs.columns:
+            pairs["bm25_score"] = 999.0
             
         chunk_size = 500_000
         for i in range(0, len(pairs), chunk_size):
