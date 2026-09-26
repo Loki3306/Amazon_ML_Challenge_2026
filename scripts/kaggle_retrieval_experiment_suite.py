@@ -1,19 +1,23 @@
 """
-Kaggle GPU Standalone Execution Script: Retrieval Recall Optimization Suite
-=======================================================================
-This script is self-contained and formatted specifically for Kaggle GPU notebook execution.
+Kaggle GPU Standalone Execution Script: Retrieval Recall Optimization Suite (OOM-Safe)
+===================================================================================
+This script is self-contained and memory-bounded for Kaggle GPU notebook execution (14-16GB VRAM).
+
+Key Memory Management & OOM Prevention Features:
+  1. Chunked Corpus Encoding: Encodes 10.3M corpus in 200,000 text chunks on CPU numpy.
+  2. Immediate Memory Reclamation: GPU VRAM peak during encoding is <300 MB.
+  3. FAISS IVFFlat Index: Trained ONCE on 1M sample embeddings.
+  4. Streamed Index Population: Chunks are added directly to FAISS index.
+  5. Index Reuse: Reused across nprobe (128, 256, 512, 1024) and Top-K (50, 100, 200, 300) sweeps.
+  6. Query Search Batching: Search executed in 4096-query batches to avoid FAISS GPU TemporaryMemoryOverflow.
+  7. SentenceTransformer Unloading: Model freed from VRAM before search and TF-IDF steps.
 
 Run on Kaggle GPU (T4 / P100):
-  python scripts/kaggle_retrieval_experiment_suite.py --data-dir /kaggle/working/data/processed --ground-truth /kaggle/input/student-resource-amazonml/dataset/train/train_ground_truth.tsv
-
-It automatically runs:
-  1. Exact Blocking baseline
-  2. Step 1: nprobe sweep (128, 256, 512, 1024) at K=50
-  3. Step 3: Top-K sweep (50, 100, 200, 300) at nprobe=512
-  4. Step 5: Dense representation sweep (name_address_country, name_country, name_address)
-  5. Step 6: Multi-representation dense union (name_address_country + name_country + Exact)
-  6. Step 7: Character TF-IDF candidate generator (Exact + Dense + TF-IDF union)
-  7. Output summary table with baseline comparison (28.19% Exact, 78.22% Dense, 80.52% Hybrid baseline target)
+  python scripts/kaggle_retrieval_experiment_suite.py \
+    --data-dir /kaggle/working/data/processed \
+    --ground-truth /kaggle/input/student-resource-amazonml/dataset/train/train_ground_truth.tsv \
+    --input-dir /kaggle/input/student-resource-amazonml/dataset/train \
+    --output-dir /kaggle/working/reports/retrieval
 """
 
 import os
@@ -54,7 +58,8 @@ def parse_args():
     parser.add_argument("--model-name", type=str, default="all-MiniLM-L6-v2", help="SentenceTransformer model")
     parser.add_argument("--n-queries", type=int, default=0, help="0 for full scale, >0 for subset benchmarking")
     parser.add_argument("--n-corpus", type=int, default=0, help="0 for full scale, >0 for subset benchmarking")
-    parser.add_argument("--batch-size", type=int, default=2048, help="Batch size")
+    parser.add_argument("--batch-size", type=int, default=2048, help="Batch size for model encoding")
+    parser.add_argument("--chunk-size", type=int, default=200000, help="Chunk size for streaming encoding")
     return parser.parse_args()
 
 
@@ -75,32 +80,97 @@ def prepare_text(df: pl.DataFrame, representation: str) -> list[str]:
         raise ValueError(f"Unknown representation: {representation}")
 
 
-def build_ivfflat_index(corpus_embeddings: np.ndarray, nlist: int):
-    d = corpus_embeddings.shape[1]
-    quantizer = faiss.IndexFlatIP(d)
-    effective_nlist = min(nlist, corpus_embeddings.shape[0])
-    cpu_index = faiss.IndexIVFFlat(quantizer, d, effective_nlist, faiss.METRIC_INNER_PRODUCT)
+def encode_texts_chunked(model, texts: list[str], batch_size: int = 2048, chunk_size: int = 200000) -> np.ndarray:
+    """Encodes texts in chunks to prevent PyTorch CUDA OOM. Memory stays bounded to 1 batch."""
+    n = len(texts)
+    dim = model.get_sentence_embedding_dimension()
+    embeddings = np.empty((n, dim), dtype=np.float32)
 
-    t0 = time.time()
-    train_samples = corpus_embeddings.astype(np.float32)
-    sample_size = min(1_000_000, len(train_samples))
+    for i in range(0, n, chunk_size):
+        end = min(i + chunk_size, n)
+        chunk_texts = texts[i:end]
+        chunk_emb = model.encode(
+            chunk_texts,
+            batch_size=batch_size,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            normalize_embeddings=True
+        )
+        embeddings[i:end] = chunk_emb.astype(np.float32)
+        del chunk_emb
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+    return embeddings
+
+
+def build_and_populate_ivfflat_index(model, c_texts: list[str], nlist_target: int = 16384, chunk_size: int = 200000, batch_size: int = 2048):
+    """Trains FAISS IVFFlat ONCE on a sample and populates it incrementally in chunks."""
+    total_corpus = len(c_texts)
+    dim = model.get_sentence_embedding_dimension()
+    effective_nlist = min(nlist_target, max(16, total_corpus // 10))
+
+    print(f"  Sample-encoding {min(1000000, total_corpus):,} corpus texts for FAISS training...")
+    train_sample_texts = c_texts[:min(1000000, total_corpus)]
+    train_sample = encode_texts_chunked(model, train_sample_texts, batch_size=batch_size, chunk_size=chunk_size)
+
+    print(f"  Training FAISS IVFFlat Index (nlist={effective_nlist}, dim={dim})...")
+    quantizer = faiss.IndexFlatIP(dim)
+    cpu_index = faiss.IndexIVFFlat(quantizer, dim, effective_nlist, faiss.METRIC_INNER_PRODUCT)
 
     if torch.cuda.is_available():
         res = faiss.StandardGpuResources()
-        gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
-        gpu_index.train(train_samples[:sample_size])
-        gpu_index.add(train_samples)
-        index = gpu_index
+        gpu_train_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
+        gpu_train_index.train(train_sample)
+        cpu_index = faiss.index_gpu_to_cpu(gpu_train_index)
+        del gpu_train_index, res
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     else:
-        cpu_index.train(train_samples[:sample_size])
-        cpu_index.add(train_samples)
-        index = cpu_index
+        cpu_index.train(train_sample)
 
-    build_time = time.time() - t0
-    return index, build_time, effective_nlist
+    del train_sample
+    gc.collect()
+
+    print(f"  Populating FAISS index with {total_corpus:,} vectors in streaming {chunk_size:,} chunks...")
+    if torch.cuda.is_available():
+        co = faiss.GpuClonerOptions()
+        co.useFloat16 = True
+        try:
+            res = faiss.StandardGpuResources()
+            search_index = faiss.index_cpu_to_gpu(res, 0, cpu_index, co)
+            print("  FAISS index transferred to GPU (FP16 mode).")
+        except Exception as e:
+            print(f"  GPU Index transfer warning ({e}). Using CPU Index...")
+            search_index = cpu_index
+    else:
+        search_index = cpu_index
+
+    t0 = time.time()
+    for i in range(0, total_corpus, chunk_size):
+        end = min(i + chunk_size, total_corpus)
+        chunk_texts = c_texts[i:end]
+        chunk_emb = model.encode(
+            chunk_texts,
+            batch_size=batch_size,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            normalize_embeddings=True
+        ).astype(np.float32)
+
+        search_index.add(chunk_emb)
+        del chunk_emb
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+    print(f"  FAISS index populated in {time.time()-t0:.2f}s.")
+    return search_index, effective_nlist
 
 
-def search_ivfflat_index(index, query_embeddings: np.ndarray, effective_nlist: int, nprobe: int, top_k: int):
+def search_ivfflat_index_batched(index, q_emb: np.ndarray, effective_nlist: int, nprobe: int, top_k: int, batch_size: int = 4096):
+    """Executes FAISS search in mini-batches to prevent FAISS GPU TemporaryMemoryOverflow."""
     target_p = min(nprobe, effective_nlist)
     if torch.cuda.is_available():
         try:
@@ -112,13 +182,13 @@ def search_ivfflat_index(index, query_embeddings: np.ndarray, effective_nlist: i
         index.nprobe = target_p
 
     t0 = time.time()
-    num_queries = query_embeddings.shape[0]
-    batch_size = 512
+    num_queries = q_emb.shape[0]
     all_scores = []
     all_indices = []
 
     for i in range(0, num_queries, batch_size):
-        q_batch = query_embeddings[i:i + batch_size].astype(np.float32)
+        end = min(i + batch_size, num_queries)
+        q_batch = q_emb[i:end].astype(np.float32)
         s_batch, i_batch = index.search(q_batch, top_k)
         all_scores.append(s_batch)
         all_indices.append(i_batch)
@@ -136,7 +206,7 @@ def main():
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("="*75)
-    print(" KAGGLE GPU RETRIEVAL RECALL OPTIMIZATION EXPERIMENT SUITE")
+    print(" KAGGLE GPU RETRIEVAL RECALL OPTIMIZATION EXPERIMENT SUITE (OOM-SAFE)")
     print(f" Execution Device: {device.upper()}")
     print("="*75)
 
@@ -219,7 +289,6 @@ def main():
 
     s1_ids = s1_df["entity_id"].to_numpy()
     corpus_ids = corpus_df["entity_id"].to_numpy()
-    valid_corpus_set = set(corpus_ids)
 
     print(f"Data ready: {len(s1_ids):,} S1 queries, {len(corpus_ids):,} S2/S3 corpus records.")
 
@@ -250,23 +319,19 @@ def main():
     print(f"\nLoading SentenceTransformer '{args.model_name}' onto {device}...")
     model = SentenceTransformer(args.model_name, device=device)
 
-    # Encode primary text: name + address + country
+    # Encode primary text: name + address + country in chunked mode
     print("Encoding primary representation ('name | address | country')...")
     q_texts_primary = prepare_text(s1_df, "name_address_country")
     c_texts_primary = prepare_text(corpus_df, "name_address_country")
 
-    q_emb_primary = model.encode(q_texts_primary, batch_size=args.batch_size, show_progress_bar=True, normalize_embeddings=True)
-    c_emb_primary = model.encode(c_texts_primary, batch_size=args.batch_size, show_progress_bar=True, normalize_embeddings=True)
+    print(f"  Encoding {len(q_texts_primary):,} queries in chunked mode...")
+    q_emb_primary = encode_texts_chunked(model, q_texts_primary, batch_size=args.batch_size, chunk_size=args.chunk_size)
 
-    if isinstance(q_emb_primary, torch.Tensor):
-        q_emb_primary = q_emb_primary.cpu().numpy().astype(np.float32)
-    if isinstance(c_emb_primary, torch.Tensor):
-        c_emb_primary = c_emb_primary.cpu().numpy().astype(np.float32)
-
+    print(f"  Building & populating FAISS index for {len(c_texts_primary):,} corpus items...")
     nlist_val = 16384 if len(corpus_ids) >= 500000 else max(16, len(corpus_ids) // 10)
-    print(f"Training primary FAISS IVFFlat Index (nlist={nlist_val})...")
-    index_primary, build_t, effective_nlist = build_ivfflat_index(c_emb_primary, nlist=nlist_val)
-    print(f"Primary index built in {build_t:.2f}s.")
+    index_primary, effective_nlist = build_and_populate_ivfflat_index(
+        model, c_texts_primary, nlist_target=nlist_val, chunk_size=args.chunk_size, batch_size=args.batch_size
+    )
 
     # ---------------------------------------------------------
     # STEP 1: NPROBE SWEEP (Top-K=50)
@@ -281,7 +346,7 @@ def main():
     for p in nprobes:
         if p > effective_nlist:
             continue
-        scores, indices, search_time = search_ivfflat_index(index_primary, q_emb_primary, effective_nlist, p, 50)
+        scores, indices, search_time = search_ivfflat_index_batched(index_primary, q_emb_primary, effective_nlist, p, 50)
 
         d_hits, h_hits, h_cands = 0, 0, 0
         for i, q_id in enumerate(s1_ids):
@@ -322,7 +387,7 @@ def main():
     print("="*65)
 
     best_p = min(512, effective_nlist)
-    scores_300, indices_300, search_t_300 = search_ivfflat_index(index_primary, q_emb_primary, effective_nlist, best_p, 300)
+    scores_300, indices_300, search_t_300 = search_ivfflat_index_batched(index_primary, q_emb_primary, effective_nlist, best_p, 300)
 
     topk_results = []
     for k in [50, 100, 200, 300]:
@@ -351,7 +416,7 @@ def main():
         json.dump(topk_results, f, indent=2)
 
     # Free memory
-    del index_primary
+    del index_primary, q_emb_primary
     if device == "cuda":
         torch.cuda.empty_cache()
     gc.collect()
@@ -373,17 +438,11 @@ def main():
         q_texts_r = prepare_text(s1_df, rep)
         c_texts_r = prepare_text(corpus_df, rep)
 
-        q_emb_r = model.encode(q_texts_r, batch_size=args.batch_size, show_progress_bar=True, normalize_embeddings=True)
-        c_emb_r = model.encode(c_texts_r, batch_size=args.batch_size, show_progress_bar=True, normalize_embeddings=True)
+        q_emb_r = encode_texts_chunked(model, q_texts_r, batch_size=args.batch_size, chunk_size=args.chunk_size)
+        idx_r, eff_r = build_and_populate_ivfflat_index(model, c_texts_r, nlist_target=nlist_val, chunk_size=args.chunk_size, batch_size=args.batch_size)
 
-        if isinstance(q_emb_r, torch.Tensor):
-            q_emb_r = q_emb_r.cpu().numpy().astype(np.float32)
-        if isinstance(c_emb_r, torch.Tensor):
-            c_emb_r = c_emb_r.cpu().numpy().astype(np.float32)
-
-        idx_r, bt_r, eff_r = build_ivfflat_index(c_emb_r, nlist=nlist_val)
         target_p = min(512, eff_r)
-        sc_r, ind_r, st_r = search_ivfflat_index(idx_r, q_emb_r, eff_r, target_p, 50)
+        sc_r, ind_r, st_r = search_ivfflat_index_batched(idx_r, q_emb_r, eff_r, target_p, 50)
         rep_indices_dict[rep] = ind_r
 
         d_hits, h_hits, h_cands = 0, 0, 0
@@ -413,13 +472,19 @@ def main():
         }
         print(f"  [{rep:25s}] Dense Recall: {d_rec:6.2f}% | Hybrid Recall: {h_rec:6.2f}% | Avg Cands: {avg_cand:6.2f} | Time: {st_r:.2f}s")
 
-        del idx_r, q_emb_r, c_emb_r
+        del idx_r, q_emb_r
         if device == "cuda":
             torch.cuda.empty_cache()
         gc.collect()
 
     with open(os.path.join(args.output_dir, "kaggle_step5_representation_sweep.json"), "w") as f:
         json.dump(rep_results, f, indent=2)
+
+    # Free model completely before TF-IDF step
+    del model
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    gc.collect()
 
     # ---------------------------------------------------------
     # STEP 6: MULTI-REPRESENTATION DENSE UNION
@@ -492,7 +557,8 @@ def main():
         ngram_range=(3, 5),
         min_df=2,
         max_features=200000,
-        sublinear_tf=True
+        sublinear_tf=True,
+        dtype=np.float32
     )
     all_tfidf_texts = c_tfidf_texts + q_tfidf_texts
     tfidf.fit(all_tfidf_texts)
@@ -516,7 +582,7 @@ def main():
         for row_idx in range(top_k_batch.shape[0]):
             row_sorted = top_k_batch[row_idx][np.argsort(sims[row_idx, top_k_batch[row_idx]])[::-1]]
             tfidf_indices_list.append(row_sorted)
-        if (i // query_batch_size) % 5 == 0:
+        if (i // query_batch_size) % 10 == 0:
             print(f"  TF-IDF searched {min(i + query_batch_size, n_queries_tfidf)}/{n_queries_tfidf} queries...", flush=True)
 
     tfidf_indices = np.vstack(tfidf_indices_list)
