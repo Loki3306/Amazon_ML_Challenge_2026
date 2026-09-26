@@ -35,6 +35,7 @@ Memory model (per 2M-row chunk, float32 arrays)
 
 from __future__ import annotations
 import os, sys, gc, json, time, argparse, logging
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from collections import defaultdict
 from typing import Any
@@ -630,8 +631,27 @@ def generate_features(
                         "cand_name", "cand_addr", "cand_country"]:
                 chunk = chunk.with_columns(pl.col(col).fill_null(""))
 
-            # Compute features
-            feats = compute_features_for_chunk(chunk, workers=args.workers)
+            # ── Compute features (parallelised across all CPU cores) ────────
+            # ProcessPoolExecutor fork-safe: compute_features_for_chunk is pure.
+            n_cores = os.cpu_count() or 1
+            if args.workers > 0:
+                n_cores = args.workers
+            if n_cores > 1 and chunk.height > 20_000:
+                sub_size  = (chunk.height + n_cores - 1) // n_cores
+                sub_chunks = [chunk.slice(i, sub_size)
+                              for i in range(0, chunk.height, sub_size)]
+                with ProcessPoolExecutor(max_workers=n_cores) as pool:
+                    futs = [
+                        pool.submit(compute_features_for_chunk, sc, 1)
+                        for sc in sub_chunks
+                    ]
+                    sub_feats = [f.result() for f in futs]
+                feats = {
+                    k: np.concatenate([sf[k] for sf in sub_feats])
+                    for k in sub_feats[0].keys()
+                }
+            else:
+                feats = compute_features_for_chunk(chunk, workers=1)
 
             # Assemble shard
             shard_data: dict[str, Any] = {
@@ -692,29 +712,34 @@ def train_lightgbm(args, train_shards: list[str], val_shards: list[str]) -> dict
     log.info("LIGHTGBM TRAINING")
     log.info("━" * 60)
 
-    log.info("Loading %d train shards...", len(train_shards))
-    train_df = pl.concat([pl.read_parquet(p) for p in train_shards])
-    log.info("  Train rows: %d  RAM=%.1fGB", train_df.height, ram_gb())
+    # ── Per-shard negative downsampling BEFORE concat (RAM safety) ──────────
+    # Without this, 120M BM25 rows would fill all 30GB of Kaggle RAM before
+    # LightGBM even starts. We downsample negatives while loading so peak RAM
+    # stays proportional to n_positives × ratio instead of total candidate pairs.
+    log.info("Loading %d train shards (per-shard neg downsampling, ratio=%.1f×)...",
+             len(train_shards), args.negative_sample_ratio if args.negative_sample_ratio > 0 else float('inf'))
+    train_parts: list[pl.DataFrame] = []
+    n_pos_tr, n_neg_tr = 0, 0
+    for p in train_shards:
+        df = pl.read_parquet(p)
+        pos = df.filter(pl.col("label") == 1)
+        neg = df.filter(pl.col("label") == 0)
+        if args.negative_sample_ratio > 0 and len(neg) > 0:
+            n_keep = int(max(len(pos), 1) * args.negative_sample_ratio)
+            if len(neg) > n_keep:
+                neg = neg.sample(n=n_keep, seed=args.seed)
+        n_pos_tr += len(pos)
+        n_neg_tr += len(neg)
+        train_parts.append(pl.concat([pos, neg]))
+        del df, pos, neg
+    train_df = pl.concat(train_parts).sample(fraction=1.0, shuffle=True, seed=args.seed)
+    del train_parts; gc.collect()
+    log.info("  Train rows: %d  (pos=%d  neg=%d)  RAM=%.1fGB",
+             train_df.height, n_pos_tr, n_neg_tr, ram_gb())
 
     log.info("Loading %d val shards...", len(val_shards))
     val_df = pl.concat([pl.read_parquet(p) for p in val_shards])
     log.info("  Val rows: %d", val_df.height)
-
-    n_pos_tr = int((train_df["label"] == 1).sum())
-    n_neg_tr = int((train_df["label"] == 0).sum())
-
-    # ── Optional negative downsampling ──────────────────────────────────────
-    if args.negative_sample_ratio > 0 and n_neg_tr > 0:
-        n_keep = int(n_pos_tr * args.negative_sample_ratio)
-        log.info("Negative sampling: keeping %d / %d negatives (ratio=%.1f×)",
-                 n_keep, n_neg_tr, args.negative_sample_ratio)
-        pos_df  = train_df.filter(pl.col("label") == 1)
-        neg_df  = (train_df.filter(pl.col("label") == 0)
-                           .sample(n=min(n_keep, n_neg_tr), seed=args.seed))
-        train_df = pl.concat([pos_df, neg_df]).sample(fraction=1.0, shuffle=True,
-                                                       seed=args.seed)
-        n_neg_tr = neg_df.height
-        log.info("  Training on %d pos + %d neg", n_pos_tr, n_neg_tr)
 
     spw = n_neg_tr / max(n_pos_tr, 1)
 
