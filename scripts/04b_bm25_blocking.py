@@ -55,6 +55,7 @@ def parse_args():
     # BM25 approximation: sublinear_tf + max_df is a strong BM25 approximation
     parser.add_argument("--max-df", type=float, default=0.001, help="Drop terms in >X% of docs (removes stopwords)")
     parser.add_argument("--min-df", type=int, default=2)
+    parser.add_argument("--use-cupy", action="store_true", help="Use CuPy for GPU sparse dot product")
     return parser.parse_args()
 
 
@@ -133,10 +134,59 @@ def build_text_series(df: pl.DataFrame, fields: str) -> list[str]:
 
 
 def chunked_topk_sparse(query_matrix: sp.csr_matrix, corpus_matrix_T: sp.csr_matrix,
-                          top_k: int, chunk_size: int):
+                          top_k: int, chunk_size: int, use_cupy: bool = False):
     topk_fn, use_fast = get_topk_fn(top_k)
     n_queries = query_matrix.shape[0]
     all_rows, all_cols, all_scores = [], [], []
+
+    if use_cupy:
+        import cupy as cp
+        import cupyx.scipy.sparse as cxsp
+        import time
+        from datetime import timedelta
+        
+        print("  [CuPy] Transferring corpus matrix to GPU...")
+        corpus_gpu = cxsp.csr_matrix(corpus_matrix_T)
+        t_start = time.time()
+        
+        for start in range(0, n_queries, chunk_size):
+            end = min(start + chunk_size, n_queries)
+            q_chunk = cxsp.csr_matrix(query_matrix[start:end])
+            
+            sim_gpu = q_chunk.dot(corpus_gpu)
+            # Row-by-row extraction to prevent dense materialization
+            for local_row in range(end - start):
+                global_row = start + local_row
+                ptr_start = int(sim_gpu.indptr[local_row])
+                ptr_end = int(sim_gpu.indptr[local_row + 1])
+                
+                if ptr_start == ptr_end:
+                    continue
+                    
+                cols = sim_gpu.indices[ptr_start:ptr_end].get()
+                scrs = sim_gpu.data[ptr_start:ptr_end].get()
+                
+                # Sort to get top_k
+                if len(cols) > top_k:
+                    top_idx = np.argpartition(scrs, -top_k)[-top_k:]
+                    cols = cols[top_idx]
+                    scrs = scrs[top_idx]
+                    
+                valid = scrs > 0
+                if np.any(valid):
+                    v_cols = cols[valid]
+                    v_scrs = scrs[valid]
+                    all_rows.extend([global_row] * len(v_cols))
+                    all_cols.extend(v_cols.tolist())
+                    all_scores.extend(v_scrs.tolist())
+                    
+            elapsed = time.time() - t_start
+            throughput = end / elapsed if elapsed > 0 else 0
+            eta_s = (n_queries - end) / throughput if throughput > 0 else 0
+            eta_str = str(timedelta(seconds=int(eta_s)))
+            if (start // chunk_size) % 1 == 0:
+                print(f"  [CuPy] {end}/{n_queries} queries | {throughput:.1f} q/s | ETA: {eta_str}")
+        return np.array(all_rows, dtype=np.int32), np.array(all_cols, dtype=np.int32), np.array(all_scores, dtype=np.float32)
 
     if use_fast:
         import time
@@ -261,7 +311,7 @@ def main():
 
     print(f"Computing Top-{args.top_k} in chunks of {args.chunk_size}...")
     t0 = time.time()
-    row_idxs, col_idxs, scores = chunked_topk_sparse(query_matrix, corpus_matrix_T, args.top_k, args.chunk_size)
+    row_idxs, col_idxs, scores = chunked_topk_sparse(query_matrix, corpus_matrix_T, args.top_k, args.chunk_size, args.use_cupy)
     print(f"  Retrieval done in {time.time()-t0:.1f}s, {len(row_idxs)} raw pairs")
     del query_matrix, corpus_matrix_T
     gc.collect()
