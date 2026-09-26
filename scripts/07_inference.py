@@ -139,8 +139,14 @@ def main():
             addr_jac = feat_dict.get("addr_token_jaccard", np.zeros(len(query_ids), dtype=np.float32))
             name_exact = feat_dict.get("name_exact_norm",  np.zeros(len(query_ids), dtype=np.float32))
 
-            # Extract features for LightGBM
-            X = np.column_stack([feat_dict[name] for name in feature_names])
+            # Extract features for LightGBM.
+            # Fill any feature the model expects but we no longer compute with 0.
+            # This neutralises country_exact (always 0) so it can't block French entities.
+            n_rows = len(query_ids)
+            X = np.column_stack([
+                feat_dict.get(name, np.zeros(n_rows, dtype=np.float32))
+                for name in feature_names
+            ])
             
             # Free memory
             del feat_dict
