@@ -60,7 +60,10 @@ def compute_gpu_features(chunk: cudf.DataFrame) -> cudf.DataFrame:
     chunk['name_len_diff'] = cp.abs(chunk['name_s1'].str.len() - chunk['name_cand'].str.len()).astype(cp.float32)
     
     features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff']
-    return chunk[['query_id', 'candidate_id', 'label'] + features]
+    out_cols = ['query_id', 'candidate_id'] + features
+    if 'label' in chunk.columns:
+        out_cols.append('label')
+    return chunk[out_cols]
 
 def main():
     args = parse_args()
