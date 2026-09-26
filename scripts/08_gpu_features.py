@@ -86,7 +86,7 @@ def main():
     
     print(f"Found {len(train_shards)} candidate files.")
     
-    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff']
+    features = ['name_exact', 'addr_exact', 'name_lev_sim', 'addr_lev_sim', 'name_len_diff', 'dense_score', 'dense_rank']
     all_X = []
     all_y = []
     
