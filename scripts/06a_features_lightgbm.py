@@ -336,9 +336,7 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         "addr_jaro_winkler":  addr_jw,
         "addr_levenshtein":   addr_lev,
         "addr_token_jaccard": addr_tok,
-        # G3 country
-        "country_exact":      country_exact,
-        # G4 retrieval
+        # G4 retrieval  (country_exact removed — hurts generalization to unseen countries)
         "dense_score":        dense_scores,
         "dense_rank":         dense_ranks,
         "dense_rank_inv":     1.0 / (dense_ranks + 1.0),
@@ -352,7 +350,7 @@ FEATURE_COLS: list[str] = [
     "name_exact_norm", "name_jaro_winkler", "name_levenshtein",
     "name_token_jaccard",
     "addr_exact_norm", "addr_jaro_winkler", "addr_levenshtein", "addr_token_jaccard",
-    "country_exact",
+    # country_exact removed: overfits to train countries (US/India), fails on test (France)
     "dense_score", "dense_rank", "dense_rank_inv", "retrieval_source",
     "name_jw_x_addr_jw",
 ]
@@ -507,11 +505,15 @@ def generate_features(
                               f"{args.split}_exact_candidates.parquet")
 
     # ── Stream each parquet source in chunks ─────────────────────────────────
+    bm25_path = os.path.join(args.candidates_dir,
+                             f"{args.split}_bm25_candidates_name_word_K50.parquet")
     sources = []
     if os.path.exists(dense_path):
         sources.append(("dense", dense_path))
     if os.path.exists(exact_path):
         sources.append(("exact", exact_path))
+    if os.path.exists(bm25_path):
+        sources.append(("bm25", bm25_path))
 
     for src_name, src_path in sources:
         log.info("Processing source: %s (%s)", src_name, src_path)
@@ -551,8 +553,8 @@ def generate_features(
                     pl.lit(0.0).cast(pl.Float32).alias("dense_score"),
                     pl.lit(999).cast(pl.Int32).alias("dense_rank"),
                 ])
-            # retrieval_source: 0=dense, 1=exact
-            src_code = 0 if src_name == "dense" else 1
+            # retrieval_source: 0=dense, 1=exact, 2=bm25
+            src_code = {"dense": 0, "exact": 1, "bm25": 2}.get(src_name, 1)
             chunk = chunk.with_columns(
                 pl.lit(src_code).cast(pl.Int8).alias("retrieval_source")
             )
