@@ -42,8 +42,9 @@ from typing import Any
 import numpy as np
 import polars as pl
 import lightgbm as lgb
-from rapidfuzz import process as rf_process
+from rapidfuzz import process as rf_process, fuzz
 from rapidfuzz.distance import JaroWinkler, Jaro, Levenshtein
+from sklearn.feature_extraction.text import TfidfVectorizer
 import psutil
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -257,6 +258,34 @@ def fast_token_jaccard(s1_list, cand_list) -> np.ndarray:
     return np.array(list(map(jaccard, s1_sets, cand_sets)), dtype=np.float32)
 
 
+def fast_tfidf_cosine(s1_list, cand_list, n_gram=(2,3)):
+    """Computes exact TF-IDF Cosine Similarity on the fly for a chunk of pairs."""
+    unique_strs = list(set(s1_list + cand_list))
+    if not unique_strs:
+        return np.zeros(len(s1_list), dtype=np.float32)
+    
+    vec = TfidfVectorizer(analyzer='char_wb', ngram_range=n_gram, dtype=np.float32)
+    vec.fit(unique_strs)
+    
+    s1_vec = vec.transform(s1_list)
+    cand_vec = vec.transform(cand_list)
+    
+    sim = s1_vec.multiply(cand_vec).sum(axis=1).A1
+    return sim.astype(np.float32)
+
+
+# Initialize cross encoder once
+_cross_encoder = None
+def get_cross_encoder():
+    global _cross_encoder
+    if _cross_encoder is None:
+        from sentence_transformers import CrossEncoder
+        log.info("Loading Cross-Encoder (ms-marco-MiniLM-L-6-v2)...")
+        # Using a small, fast cross-encoder
+        _cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", max_length=128)
+    return _cross_encoder
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CORE FEATURE COMPUTATION  (one chunk)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -294,6 +323,8 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
     name_jw  = np.ones(n, dtype=np.float32)
     name_lev = np.ones(n, dtype=np.float32)
     name_tok_jac = np.ones(n, dtype=np.float32)
+    name_tok_sort = np.ones(n, dtype=np.float32)
+    name_tfidf_cos = np.ones(n, dtype=np.float32)
 
     need_name = ~name_exact_mask
     if need_name.any():
@@ -304,11 +335,15 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         name_jw[idx]  = fast_paired_sim(s1_n_sub, cand_n_sub, JaroWinkler.normalized_similarity)
         name_lev[idx] = fast_paired_sim(s1_n_sub, cand_n_sub, Levenshtein.normalized_similarity)
         name_tok_jac[idx] = fast_token_jaccard(s1_n_sub, cand_n_sub)
+        name_tok_sort[idx] = fast_paired_sim(s1_n_sub, cand_n_sub, fuzz.token_sort_ratio) / 100.0
+        name_tfidf_cos[idx] = fast_tfidf_cosine(s1_n_sub, cand_n_sub)
 
     # ── G2: Address similarities ──────────────────────────────────────────────
     addr_jw  = np.ones(n, dtype=np.float32)
     addr_lev = np.ones(n, dtype=np.float32)
     addr_tok = np.ones(n, dtype=np.float32)
+    addr_tok_sort = np.ones(n, dtype=np.float32)
+    addr_tfidf_cos = np.ones(n, dtype=np.float32)
 
     need_addr = ~addr_exact_mask
     if need_addr.any():
@@ -319,11 +354,26 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         addr_jw[idx_a]  = fast_paired_sim(s1_a_sub, cand_a_sub, JaroWinkler.normalized_similarity)
         addr_lev[idx_a] = fast_paired_sim(s1_a_sub, cand_a_sub, Levenshtein.normalized_similarity)
         addr_tok[idx_a] = fast_token_jaccard(s1_a_sub, cand_a_sub)
+        addr_tok_sort[idx_a] = fast_paired_sim(s1_a_sub, cand_a_sub, fuzz.token_sort_ratio) / 100.0
+        addr_tfidf_cos[idx_a] = fast_tfidf_cosine(s1_a_sub, cand_a_sub)
 
     # ── G4: Retrieval signals (already numeric) ───────────────────────────────
     dense_scores = chunk["dense_score"].to_numpy().astype(np.float32)
     dense_ranks  = chunk["dense_rank"].to_numpy().astype(np.float32)
     ret_src      = chunk["retrieval_source"].to_numpy().astype(np.float32)
+
+    # ── G6: Cross-Encoder Re-Ranking (Only on top 5 dense candidates) ─────────
+    ce_scores = np.zeros(n, dtype=np.float32)
+    ce_mask = (dense_ranks <= 5)
+    if ce_mask.any():
+        ce_model = get_cross_encoder()
+        s1_texts = [f"{s1_names[i]} {s1_addrs[i]} {s1_ctrs[i]}".strip() for i in range(n) if ce_mask[i]]
+        cand_texts = [f"{cand_names[i]} {cand_addrs[i]} {cand_ctrs[i]}".strip() for i in range(n) if ce_mask[i]]
+        ce_inputs = list(zip(s1_texts, cand_texts))
+        
+        # Batch predict to save time
+        preds = ce_model.predict(ce_inputs, batch_size=256, show_progress_bar=False)
+        ce_scores[ce_mask] = preds
 
     return {
         # G1 name
@@ -331,11 +381,15 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         "name_jaro_winkler":  name_jw,
         "name_levenshtein":   name_lev,
         "name_token_jaccard": name_tok_jac,
+        "name_token_sort":    name_tok_sort,
+        "name_tfidf_cos":     name_tfidf_cos,
         # G2 address
         "addr_exact_norm":    addr_exact_norm,
         "addr_jaro_winkler":  addr_jw,
         "addr_levenshtein":   addr_lev,
         "addr_token_jaccard": addr_tok,
+        "addr_token_sort":    addr_tok_sort,
+        "addr_tfidf_cos":     addr_tfidf_cos,
         # G3 country
         "country_exact":      country_exact,
         # G4 retrieval
@@ -345,16 +399,20 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         "retrieval_source":   ret_src,
         # G5 cross-field
         "name_jw_x_addr_jw":  name_jw * addr_jw,
+        # G6 cross-encoder
+        "cross_encoder_score": ce_scores,
     }
 
 
 FEATURE_COLS: list[str] = [
     "name_exact_norm", "name_jaro_winkler", "name_levenshtein",
-    "name_token_jaccard",
-    "addr_exact_norm", "addr_jaro_winkler", "addr_levenshtein", "addr_token_jaccard",
+    "name_token_jaccard", "name_token_sort", "name_tfidf_cos",
+    "addr_exact_norm", "addr_jaro_winkler", "addr_levenshtein", 
+    "addr_token_jaccard", "addr_token_sort", "addr_tfidf_cos",
     "country_exact",
     "dense_score", "dense_rank", "dense_rank_inv", "retrieval_source",
     "name_jw_x_addr_jw",
+    "cross_encoder_score",
 ]
 
 
