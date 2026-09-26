@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ground-truth",          required=True)
     p.add_argument("--split",                 default="train")
     p.add_argument("--chunk-size",            type=int,   default=2_000_000)
-    p.add_argument("--workers",               type=int,   default=4,
+    p.add_argument("--workers",               type=int,   default=-1,
                    help="cdist parallel workers (-1 = all CPU cores)")
     p.add_argument("--val-fraction",          type=float, default=0.15)
     p.add_argument("--seed",                  type=int,   default=42)
@@ -673,6 +673,16 @@ def train_lightgbm(args, train_shards: list[str], val_shards: list[str]) -> dict
     y_val = val_df["label"].to_numpy()
     del train_df, val_df; gc.collect()
 
+    # Try GPU first, fall back to CPU silently
+    try:
+        import subprocess
+        subprocess.check_output(["nvidia-smi"], stderr=subprocess.DEVNULL)
+        device = "gpu"
+        log.info("GPU detected — using device=gpu for LightGBM")
+    except Exception:
+        device = "cpu"
+        log.info("No GPU detected — using CPU for LightGBM")
+
     params = {
         "objective": "binary", "metric": ["binary_logloss", "auc"],
         "boosting_type": "gbdt", "num_leaves": 127,
@@ -681,6 +691,7 @@ def train_lightgbm(args, train_shards: list[str], val_shards: list[str]) -> dict
         "min_child_samples": 50, "subsample": 0.8, "colsample_bytree": 0.8,
         "reg_alpha": 0.1, "reg_lambda": 0.1,
         "random_state": args.seed, "n_jobs": -1, "verbose": -1,
+        "device": device,
     }
 
     lgb_tr  = lgb.Dataset(X_tr,  label=y_tr,  feature_name=FEATURE_COLS,
