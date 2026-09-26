@@ -1,5 +1,5 @@
 """
-Kaggle GPU Standalone Execution Script: Retrieval Recall Optimization
+Kaggle GPU Standalone Execution Script: Retrieval Recall Optimization Suite
 =======================================================================
 This script is self-contained and formatted specifically for Kaggle GPU notebook execution.
 
@@ -9,12 +9,11 @@ Run on Kaggle GPU (T4 / P100):
 It automatically runs:
   1. Exact Blocking baseline
   2. Step 1: nprobe sweep (128, 256, 512, 1024) at K=50
-  3. Step 3: Top-K sweep (50, 100, 200, 300)
+  3. Step 3: Top-K sweep (50, 100, 200, 300) at nprobe=512
   4. Step 5: Dense representation sweep (name_address_country, name_country, name_address)
-  5. Step 6: Multi-representation candidate union
-  6. Step 7: Character TF-IDF lexical candidate generator
-  7. Step 8: Missed true pair analysis & failure classification
-  8. Output summary table with baseline comparison (80.52% baseline target)
+  5. Step 6: Multi-representation dense union (name_address_country + name_country + Exact)
+  6. Step 7: Character TF-IDF candidate generator (Exact + Dense + TF-IDF union)
+  7. Output summary table with baseline comparison (28.19% Exact, 78.22% Dense, 80.52% Hybrid baseline target)
 """
 
 import os
@@ -32,6 +31,8 @@ import torch
 from sentence_transformers import SentenceTransformer
 import faiss
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
 
 def find_file_in_search_paths(target_filename: str, search_roots: list[str]) -> str:
     for root_path in search_roots:
@@ -43,8 +44,9 @@ def find_file_in_search_paths(target_filename: str, search_roots: list[str]) -> 
                     return os.path.join(root, target_filename)
     return ""
 
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="Kaggle Retrieval Optimization Execution Script")
+    parser = argparse.ArgumentParser(description="Kaggle Retrieval Optimization Execution Suite")
     parser.add_argument("--data-dir", type=str, default="/kaggle/working/data/processed", help="Path to processed parquet data")
     parser.add_argument("--input-dir", type=str, default="/kaggle/input/student-resource-amazonml/dataset/train", help="Raw dataset TSV folder")
     parser.add_argument("--ground-truth", type=str, default="/kaggle/input/student-resource-amazonml/dataset/train/train_ground_truth.tsv", help="Ground truth TSV path")
@@ -55,15 +57,88 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=2048, help="Batch size")
     return parser.parse_args()
 
+
+def prepare_text(df: pl.DataFrame, representation: str) -> list[str]:
+    if representation == "name_address_country":
+        return df.select(
+            pl.concat_str([pl.col("name_norm").fill_null(""), pl.col("address_norm").fill_null(""), pl.col("country").fill_null("")], separator=" | ")
+        ).to_series().to_list()
+    elif representation == "name_country":
+        return df.select(
+            pl.concat_str([pl.col("name_norm").fill_null(""), pl.col("country").fill_null("")], separator=" | ")
+        ).to_series().to_list()
+    elif representation == "name_address":
+        return df.select(
+            pl.concat_str([pl.col("name_norm").fill_null(""), pl.col("address_norm").fill_null("")], separator=" | ")
+        ).to_series().to_list()
+    else:
+        raise ValueError(f"Unknown representation: {representation}")
+
+
+def build_ivfflat_index(corpus_embeddings: np.ndarray, nlist: int):
+    d = corpus_embeddings.shape[1]
+    quantizer = faiss.IndexFlatIP(d)
+    effective_nlist = min(nlist, corpus_embeddings.shape[0])
+    cpu_index = faiss.IndexIVFFlat(quantizer, d, effective_nlist, faiss.METRIC_INNER_PRODUCT)
+
+    t0 = time.time()
+    train_samples = corpus_embeddings.astype(np.float32)
+    sample_size = min(1_000_000, len(train_samples))
+
+    if torch.cuda.is_available():
+        res = faiss.StandardGpuResources()
+        gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
+        gpu_index.train(train_samples[:sample_size])
+        gpu_index.add(train_samples)
+        index = gpu_index
+    else:
+        cpu_index.train(train_samples[:sample_size])
+        cpu_index.add(train_samples)
+        index = cpu_index
+
+    build_time = time.time() - t0
+    return index, build_time, effective_nlist
+
+
+def search_ivfflat_index(index, query_embeddings: np.ndarray, effective_nlist: int, nprobe: int, top_k: int):
+    target_p = min(nprobe, effective_nlist)
+    if torch.cuda.is_available():
+        try:
+            ps = faiss.GpuParameterSpace()
+            ps.set_index_parameter(index, "nprobe", target_p)
+        except Exception:
+            index.nprobe = target_p
+    else:
+        index.nprobe = target_p
+
+    t0 = time.time()
+    num_queries = query_embeddings.shape[0]
+    batch_size = 512
+    all_scores = []
+    all_indices = []
+
+    for i in range(0, num_queries, batch_size):
+        q_batch = query_embeddings[i:i + batch_size].astype(np.float32)
+        s_batch, i_batch = index.search(q_batch, top_k)
+        all_scores.append(s_batch)
+        all_indices.append(i_batch)
+
+    scores = np.vstack(all_scores)
+    indices = np.vstack(all_indices)
+    search_time = time.time() - t0
+
+    return scores, indices, search_time
+
+
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print("="*70)
-    print(" KAGGLE RETRIEVAL RECALL OPTIMIZATION SUITE")
+    print("="*75)
+    print(" KAGGLE GPU RETRIEVAL RECALL OPTIMIZATION EXPERIMENT SUITE")
     print(f" Execution Device: {device.upper()}")
-    print("="*70)
+    print("="*75)
 
     # 1. Verify Ground Truth with Recursive Auto-Discovery
     gt_path = args.ground_truth
@@ -146,9 +221,12 @@ def main():
     corpus_ids = corpus_df["entity_id"].to_numpy()
     valid_corpus_set = set(corpus_ids)
 
-    print(f"Data ready: {len(s1_ids)} S1 queries, {len(corpus_ids)} S2/S3 corpus records.")
+    print(f"Data ready: {len(s1_ids):,} S1 queries, {len(corpus_ids):,} S2/S3 corpus records.")
 
-    # 3. Exact Match Candidates
+    valid_queries = [q for q in s1_ids if q in gt_dict]
+    total_true_pairs = sum(len(gt_dict[q]) for q in valid_queries)
+
+    # 3. Exact Match Baseline Candidates
     print("Computing Exact Name and Address matches...")
     s1_names = s1_df.filter(pl.col("name_norm") != "")
     c_names = corpus_df.filter(pl.col("name_norm") != "")
@@ -164,68 +242,46 @@ def main():
     for row in addr_matches.iter_rows(named=True):
         exact_dict[row["entity_id"]].add(row["entity_id_c"])
 
-    # 4. Dense Retrieval Model
-    print(f"Loading SentenceTransformer '{args.model_name}' onto {device}...")
+    exact_pair_hits = sum(len(exact_dict.get(q, set()) & gt_dict[q]) for q in valid_queries)
+    exact_pair_recall = round(exact_pair_hits / total_true_pairs * 100, 2) if total_true_pairs > 0 else 0
+    print(f"  Exact Pair Recall Baseline: {exact_pair_recall:.2f}%")
+
+    # 4. Dense Retrieval Model Setup
+    print(f"\nLoading SentenceTransformer '{args.model_name}' onto {device}...")
     model = SentenceTransformer(args.model_name, device=device)
 
     # Encode primary text: name + address + country
     print("Encoding primary representation ('name | address | country')...")
-    q_texts = s1_df.select(pl.concat_str([pl.col("name_norm").fill_null(""), pl.col("address_norm").fill_null(""), pl.col("country").fill_null("")], separator=" | ")).to_series().to_list()
-    c_texts = corpus_df.select(pl.concat_str([pl.col("name_norm").fill_null(""), pl.col("address_norm").fill_null(""), pl.col("country").fill_null("")], separator=" | ")).to_series().to_list()
+    q_texts_primary = prepare_text(s1_df, "name_address_country")
+    c_texts_primary = prepare_text(corpus_df, "name_address_country")
 
-    q_emb = model.encode(q_texts, batch_size=args.batch_size, show_progress_bar=True, convert_to_tensor=True, normalize_embeddings=True)
-    c_emb = model.encode(c_texts, batch_size=args.batch_size, show_progress_bar=True, convert_to_tensor=True, normalize_embeddings=True)
+    q_emb_primary = model.encode(q_texts_primary, batch_size=args.batch_size, show_progress_bar=True, normalize_embeddings=True)
+    c_emb_primary = model.encode(c_texts_primary, batch_size=args.batch_size, show_progress_bar=True, normalize_embeddings=True)
 
-    if isinstance(q_emb, torch.Tensor):
-        q_emb = q_emb.cpu().numpy().astype(np.float32)
-    if isinstance(c_emb, torch.Tensor):
-        c_emb = c_emb.cpu().numpy().astype(np.float32)
+    if isinstance(q_emb_primary, torch.Tensor):
+        q_emb_primary = q_emb_primary.cpu().numpy().astype(np.float32)
+    if isinstance(c_emb_primary, torch.Tensor):
+        c_emb_primary = c_emb_primary.cpu().numpy().astype(np.float32)
 
-    # Build FAISS IVFFlat Index
-    d = c_emb.shape[1]
-    nlist = 16384 if len(c_emb) >= 500000 else max(16, len(c_emb) // 10)
-    print(f"Training FAISS IVFFlat (nlist={nlist}, dim={d})...")
-
-    quantizer = faiss.IndexFlatIP(d)
-    cpu_index = faiss.IndexIVFFlat(quantizer, d, nlist, faiss.METRIC_INNER_PRODUCT)
-
-    if device == "cuda":
-        res = faiss.StandardGpuResources()
-        gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
-        gpu_index.train(c_emb[:min(1000000, len(c_emb))])
-        gpu_index.add(c_emb)
-        search_index = gpu_index
-    else:
-        cpu_index.train(c_emb[:min(1000000, len(c_emb))])
-        cpu_index.add(c_emb)
-        search_index = cpu_index
+    nlist_val = 16384 if len(corpus_ids) >= 500000 else max(16, len(corpus_ids) // 10)
+    print(f"Training primary FAISS IVFFlat Index (nlist={nlist_val})...")
+    index_primary, build_t, effective_nlist = build_ivfflat_index(c_emb_primary, nlist=nlist_val)
+    print(f"Primary index built in {build_t:.2f}s.")
 
     # ---------------------------------------------------------
-    # STEP 1: NPROBE SWEEP
+    # STEP 1: NPROBE SWEEP (Top-K=50)
     # ---------------------------------------------------------
-    print("\n" + "="*60)
-    print(" STEP 1: NPROBE SWEEP (Top-K=50)")
-    print("="*60)
+    print("\n" + "="*65)
+    print(" STEP 1: NPROBE SWEEP (128, 256, 512, 1024 at K=50)")
+    print("="*65)
 
     nprobe_results = []
     nprobes = [128, 256, 512, 1024]
     
     for p in nprobes:
-        if p > nlist:
+        if p > effective_nlist:
             continue
-        if device == "cuda":
-            ps = faiss.GpuParameterSpace()
-            ps.set_index_parameter(search_index, "nprobe", p)
-        else:
-            search_index.nprobe = p
-
-        t0 = time.time()
-        scores, indices = search_index.search(q_emb, 50)
-        search_time = time.time() - t0
-
-        # Audit recall
-        valid_queries = [q for q in s1_ids if q in gt_dict]
-        tot_true = sum(len(gt_dict[q]) for q in valid_queries)
+        scores, indices, search_time = search_ivfflat_index(index_primary, q_emb_primary, effective_nlist, p, 50)
 
         d_hits, h_hits, h_cands = 0, 0, 0
         for i, q_id in enumerate(s1_ids):
@@ -240,16 +296,16 @@ def main():
             h_hits += len(h_set.intersection(true_set))
             h_cands += len(h_set)
 
-        d_rec = d_hits / tot_true * 100
-        h_rec = h_hits / tot_true * 100
-        avg_cand = h_cands / len(valid_queries)
+        d_rec = round(d_hits / total_true_pairs * 100, 2)
+        h_rec = round(h_hits / total_true_pairs * 100, 2)
+        avg_cand = round(h_cands / len(valid_queries), 2)
 
         res_item = {
             "nprobe": p,
             "top_k": 50,
-            "dense_pair_recall_%": round(d_rec, 2),
-            "hybrid_pair_recall_%": round(h_rec, 2),
-            "avg_candidates_per_query": round(avg_cand, 2),
+            "dense_pair_recall_%": d_rec,
+            "hybrid_pair_recall_%": h_rec,
+            "avg_candidates_per_query": avg_cand,
             "search_time_sec": round(search_time, 2)
         }
         nprobe_results.append(res_item)
@@ -259,24 +315,19 @@ def main():
         json.dump(nprobe_results, f, indent=2)
 
     # ---------------------------------------------------------
-    # STEP 3: TOP-K SWEEP
+    # STEP 3: TOP-K SWEEP (at nprobe=512)
     # ---------------------------------------------------------
-    print("\n" + "="*60)
-    print(" STEP 3: TOP-K SWEEP (at nprobe=512)")
-    print("="*60)
+    print("\n" + "="*65)
+    print(" STEP 3: TOP-K SWEEP (50, 100, 200, 300 at nprobe=512)")
+    print("="*65)
 
-    best_p = 512 if 512 <= nlist else nlist
-    if device == "cuda":
-        ps = faiss.GpuParameterSpace()
-        ps.set_index_parameter(search_index, "nprobe", best_p)
-    else:
-        search_index.nprobe = best_p
-
-    scores_300, indices_300 = search_index.search(q_emb, 300)
+    best_p = min(512, effective_nlist)
+    scores_300, indices_300, search_t_300 = search_ivfflat_index(index_primary, q_emb_primary, effective_nlist, best_p, 300)
 
     topk_results = []
     for k in [50, 100, 200, 300]:
         h_hits, h_cands = 0, 0
+        d_hits = 0
         for i, q_id in enumerate(s1_ids):
             if q_id not in gt_dict:
                 continue
@@ -284,23 +335,276 @@ def main():
             e_set = exact_dict.get(q_id, set())
             d_set = set(corpus_ids[idx] for idx in indices_300[i, :k])
             h_set = e_set.union(d_set)
+            d_hits += len(d_set.intersection(true_set))
             h_hits += len(h_set.intersection(true_set))
             h_cands += len(h_set)
 
-        h_rec = h_hits / tot_true * 100
-        avg_cand = h_cands / len(valid_queries)
+        d_rec = round(d_hits / total_true_pairs * 100, 2)
+        h_rec = round(h_hits / total_true_pairs * 100, 2)
+        avg_cand = round(h_cands / len(valid_queries), 2)
 
-        item = {"K": k, "nprobe": best_p, "hybrid_pair_recall_%": round(h_rec, 2), "avg_candidates_per_query": round(avg_cand, 2)}
+        item = {"K": k, "nprobe": best_p, "dense_pair_recall_%": d_rec, "hybrid_pair_recall_%": h_rec, "avg_candidates_per_query": avg_cand}
         topk_results.append(item)
-        print(f"  K={k:3d} | Hybrid Recall: {h_rec:6.2f}% | Avg Cands/S1: {avg_cand:6.2f}")
+        print(f"  K={k:3d} | Dense Recall: {d_rec:6.2f}% | Hybrid Recall: {h_rec:6.2f}% | Avg Cands/S1: {avg_cand:6.2f}")
 
     with open(os.path.join(args.output_dir, "kaggle_step3_topk_sweep.json"), "w") as f:
         json.dump(topk_results, f, indent=2)
 
-    print("\n" + "="*70)
-    print(" KAGGLE RETRIEVAL EXPERIMENTS COMPLETED!")
-    print(f" Results saved to: {args.output_dir}")
-    print("="*70)
+    # Free memory
+    del index_primary
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    gc.collect()
+
+    # ---------------------------------------------------------
+    # STEP 5: DENSE REPRESENTATION COMPARISON (nprobe=512, K=50)
+    # Compares: name_address_country vs name_country vs name_address
+    # ---------------------------------------------------------
+    print("\n" + "="*65)
+    print(" STEP 5: DENSE REPRESENTATION SWEEP (at nprobe=512, K=50)")
+    print("="*65)
+
+    representations = ["name_address_country", "name_country", "name_address"]
+    rep_results = {}
+    rep_indices_dict = {}
+
+    for rep in representations:
+        print(f"\n  Encoding representation: '{rep}'...")
+        q_texts_r = prepare_text(s1_df, rep)
+        c_texts_r = prepare_text(corpus_df, rep)
+
+        q_emb_r = model.encode(q_texts_r, batch_size=args.batch_size, show_progress_bar=True, normalize_embeddings=True)
+        c_emb_r = model.encode(c_texts_r, batch_size=args.batch_size, show_progress_bar=True, normalize_embeddings=True)
+
+        if isinstance(q_emb_r, torch.Tensor):
+            q_emb_r = q_emb_r.cpu().numpy().astype(np.float32)
+        if isinstance(c_emb_r, torch.Tensor):
+            c_emb_r = c_emb_r.cpu().numpy().astype(np.float32)
+
+        idx_r, bt_r, eff_r = build_ivfflat_index(c_emb_r, nlist=nlist_val)
+        target_p = min(512, eff_r)
+        sc_r, ind_r, st_r = search_ivfflat_index(idx_r, q_emb_r, eff_r, target_p, 50)
+        rep_indices_dict[rep] = ind_r
+
+        d_hits, h_hits, h_cands = 0, 0, 0
+        for i, q_id in enumerate(s1_ids):
+            if q_id not in gt_dict:
+                continue
+            true_set = gt_dict[q_id]
+            e_set = exact_dict.get(q_id, set())
+            d_set = set(corpus_ids[idx] for idx in ind_r[i])
+            h_set = e_set.union(d_set)
+            d_hits += len(d_set.intersection(true_set))
+            h_hits += len(h_set.intersection(true_set))
+            h_cands += len(h_set)
+
+        d_rec = round(d_hits / total_true_pairs * 100, 2)
+        h_rec = round(h_hits / total_true_pairs * 100, 2)
+        avg_cand = round(h_cands / len(valid_queries), 2)
+
+        rep_results[rep] = {
+            "representation": rep,
+            "nprobe": target_p,
+            "top_k": 50,
+            "dense_pair_recall_%": d_rec,
+            "hybrid_pair_recall_%": h_rec,
+            "avg_candidates_per_query": avg_cand,
+            "search_time_sec": round(st_r, 2)
+        }
+        print(f"  [{rep:25s}] Dense Recall: {d_rec:6.2f}% | Hybrid Recall: {h_rec:6.2f}% | Avg Cands: {avg_cand:6.2f} | Time: {st_r:.2f}s")
+
+        del idx_r, q_emb_r, c_emb_r
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        gc.collect()
+
+    with open(os.path.join(args.output_dir, "kaggle_step5_representation_sweep.json"), "w") as f:
+        json.dump(rep_results, f, indent=2)
+
+    # ---------------------------------------------------------
+    # STEP 6: MULTI-REPRESENTATION DENSE UNION
+    # Combines Dense(name_address_country) + Dense(name_country) + Exact
+    # ---------------------------------------------------------
+    print("\n" + "="*65)
+    print(" STEP 6: MULTI-REPRESENTATION DENSE UNION (K=50)")
+    print("="*65)
+
+    base_hybrid_recall = rep_results["name_address_country"]["hybrid_pair_recall_%"]
+
+    union_pair_hits = 0
+    union_cands = 0
+    for i, q_id in enumerate(s1_ids):
+        if q_id not in gt_dict:
+            continue
+        true_set = gt_dict[q_id]
+        e_set = exact_dict.get(q_id, set())
+
+        d_union = set()
+        for rep in ["name_address_country", "name_country"]:
+            if rep in rep_indices_dict:
+                d_union |= set(corpus_ids[idx] for idx in rep_indices_dict[rep][i])
+
+        full_union = e_set | d_union
+        union_cands += len(full_union)
+        union_pair_hits += len(full_union & true_set)
+
+    union_pair_recall = round(union_pair_hits / total_true_pairs * 100, 2)
+    avg_cands_union = round(union_cands / len(valid_queries), 2)
+    incremental_gain = round(union_pair_recall - base_hybrid_recall, 2)
+
+    print(f"  Baseline Hybrid (name_address_country + Exact): {base_hybrid_recall:.2f}%")
+    print(f"  Multi-Rep Union (name_address_country + name_country + Exact): {union_pair_recall:.2f}%")
+    print(f"  Incremental Gain: +{incremental_gain:.2f} percentage points")
+    print(f"  Avg Candidates/S1: {avg_cands_union:.2f}")
+
+    step6_results = {
+        "nprobe": 512,
+        "top_k": 50,
+        "representations_used": ["name_address_country", "name_country"],
+        "baseline_hybrid_pair_recall_%": base_hybrid_recall,
+        "multi_rep_union_pair_recall_%": union_pair_recall,
+        "incremental_gain_%": incremental_gain,
+        "avg_candidates_per_query": avg_cands_union
+    }
+    with open(os.path.join(args.output_dir, "kaggle_step6_multirep_union.json"), "w") as f:
+        json.dump(step6_results, f, indent=2)
+
+    # ---------------------------------------------------------
+    # STEP 7: CHARACTER TF-IDF CANDIDATE GENERATOR & HYBRID RECALL EVALUATION
+    # Uses ngram_range=(3,5) on business_name + business_address
+    # Evaluates Exact + Dense + TF-IDF union
+    # ---------------------------------------------------------
+    print("\n" + "="*65)
+    print(" STEP 7: CHARACTER TF-IDF CANDIDATE GENERATOR (K=50)")
+    print("="*65)
+
+    print("Building character TF-IDF (ngram_range=(3,5)) on name + address...")
+    q_tfidf_texts = s1_df.select(
+        pl.concat_str([pl.col("name_norm").fill_null(""), pl.col("address_norm").fill_null("")], separator=" ")
+    ).to_series().to_list()
+    c_tfidf_texts = corpus_df.select(
+        pl.concat_str([pl.col("name_norm").fill_null(""), pl.col("address_norm").fill_null("")], separator=" ")
+    ).to_series().to_list()
+
+    t0_tfidf = time.time()
+    tfidf = TfidfVectorizer(
+        analyzer="char_wb",
+        ngram_range=(3, 5),
+        min_df=2,
+        max_features=200000,
+        sublinear_tf=True
+    )
+    all_tfidf_texts = c_tfidf_texts + q_tfidf_texts
+    tfidf.fit(all_tfidf_texts)
+
+    c_tfidf_mat = tfidf.transform(c_tfidf_texts)
+    q_tfidf_mat = tfidf.transform(q_tfidf_texts)
+    print(f"TF-IDF matrix built: corpus={c_tfidf_mat.shape}, queries={q_tfidf_mat.shape} in {time.time()-t0_tfidf:.2f}s", flush=True)
+
+    tfidf_top_k = 50
+    t0_tfidf_search = time.time()
+
+    tfidf_indices_list = []
+    query_batch_size = 500
+    n_queries_tfidf = q_tfidf_mat.shape[0]
+
+    print(f"Searching TF-IDF Top-{tfidf_top_k} for {n_queries_tfidf} queries...", flush=True)
+    for i in range(0, n_queries_tfidf, query_batch_size):
+        q_batch = q_tfidf_mat[i:i + query_batch_size]
+        sims = cosine_similarity(q_batch, c_tfidf_mat)
+        top_k_batch = np.argpartition(sims, -tfidf_top_k, axis=1)[:, -tfidf_top_k:]
+        for row_idx in range(top_k_batch.shape[0]):
+            row_sorted = top_k_batch[row_idx][np.argsort(sims[row_idx, top_k_batch[row_idx]])[::-1]]
+            tfidf_indices_list.append(row_sorted)
+        if (i // query_batch_size) % 5 == 0:
+            print(f"  TF-IDF searched {min(i + query_batch_size, n_queries_tfidf)}/{n_queries_tfidf} queries...", flush=True)
+
+    tfidf_indices = np.vstack(tfidf_indices_list)
+    tfidf_search_time = time.time() - t0_tfidf_search
+    print(f"TF-IDF search completed in {tfidf_search_time:.2f}s")
+
+    tfidf_pair_hits = 0
+    exact_tfidf_pair_hits = 0
+    dense_tfidf_pair_hits = 0
+    full_union_pair_hits = 0
+    full_union_cand_count = 0
+
+    primary_dense_indices = rep_indices_dict.get("name_address_country", None)
+
+    for i, q_id in enumerate(s1_ids):
+        if q_id not in gt_dict:
+            continue
+        true_set = gt_dict[q_id]
+        e_set = exact_dict.get(q_id, set())
+        d_set = set(corpus_ids[idx] for idx in primary_dense_indices[i]) if primary_dense_indices is not None else set()
+        t_set = set(corpus_ids[idx] for idx in tfidf_indices[i])
+
+        tfidf_pair_hits += len(t_set & true_set)
+        exact_tfidf_pair_hits += len((e_set | t_set) & true_set)
+        dense_tfidf_pair_hits += len((d_set | t_set) & true_set)
+
+        full_union = e_set | d_set | t_set
+        full_union_cand_count += len(full_union)
+        full_union_pair_hits += len(full_union & true_set)
+
+    tfidf_pair_recall = round(tfidf_pair_hits / total_true_pairs * 100, 2)
+    exact_tfidf_recall = round(exact_tfidf_pair_hits / total_true_pairs * 100, 2)
+    dense_tfidf_recall = round(dense_tfidf_pair_hits / total_true_pairs * 100, 2)
+    full_union_recall = round(full_union_pair_hits / total_true_pairs * 100, 2)
+    avg_cands_full = round(full_union_cand_count / len(valid_queries), 2)
+
+    print(f"\n  TF-IDF Pair Recall@50:                     {tfidf_pair_recall:.2f}%")
+    print(f"  Exact + TF-IDF Pair Recall:               {exact_tfidf_recall:.2f}%")
+    print(f"  Dense + TF-IDF Pair Recall:               {dense_tfidf_recall:.2f}%")
+    print(f"  Exact + Dense + TF-IDF Pair Recall:       {full_union_recall:.2f}%")
+    print(f"  Avg Candidates/S1 (Full Union):            {avg_cands_full:.2f}")
+
+    step7_results = {
+        "nprobe": 512,
+        "top_k": 50,
+        "tfidf_ngram_range": [3, 5],
+        "tfidf_max_features": 200000,
+        "tfidf_pair_recall_%": tfidf_pair_recall,
+        "exact_tfidf_pair_recall_%": exact_tfidf_recall,
+        "dense_tfidf_pair_recall_%": dense_tfidf_recall,
+        "exact_dense_tfidf_pair_recall_%": full_union_recall,
+        "avg_candidates_per_query_full_union": avg_cands_full,
+        "tfidf_search_time_sec": round(tfidf_search_time, 2)
+    }
+    with open(os.path.join(args.output_dir, "kaggle_step7_tfidf_union.json"), "w") as f:
+        json.dump(step7_results, f, indent=2)
+
+    # Master Summary Report
+    master_summary = {
+        "timestamp": datetime.now().isoformat(),
+        "baseline_targets": {
+            "exact_pair_recall_%": 28.19,
+            "dense_top50_pair_recall_%": 78.22,
+            "hybrid_pair_recall_%": 80.52
+        },
+        "kaggle_measured_results": {
+            "exact_pair_recall_%": exact_pair_recall,
+            "nprobe_sweep_k50": nprobe_results,
+            "topk_sweep_nprobe512": topk_results,
+            "representation_sweep": rep_results,
+            "multirep_union": step6_results,
+            "tfidf_hybrid_union": step7_results
+        }
+    }
+    summary_path = os.path.join(args.output_dir, "retrieval_summary_report.json")
+    with open(summary_path, "w") as f:
+        json.dump(master_summary, f, indent=2)
+
+    # Save copy to /kaggle/working/ if running under Kaggle
+    if os.path.exists("/kaggle/working"):
+        kw_summary = "/kaggle/working/retrieval_summary_report.json"
+        with open(kw_summary, "w") as f:
+            json.dump(master_summary, f, indent=2)
+
+    print("\n" + "="*75)
+    print(" KAGGLE RETRIEVAL EXPERIMENTS COMPLETED SUCCESSFULLY!")
+    print(f" Saved full summary report to: {summary_path}")
+    print("="*75)
 
 if __name__ == "__main__":
     main()
