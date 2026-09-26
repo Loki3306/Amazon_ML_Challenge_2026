@@ -134,6 +134,11 @@ def main():
             # Compute features
             feat_dict = feat_gen.compute_features_for_chunk(chunk, workers=args.workers)
             
+            # Rule-based override inputs (before deleting feat_dict)
+            name_jw  = feat_dict.get("name_jaro_winkler",  np.zeros(len(query_ids), dtype=np.float32))
+            addr_jac = feat_dict.get("addr_token_jaccard", np.zeros(len(query_ids), dtype=np.float32))
+            name_exact = feat_dict.get("name_exact_norm",  np.zeros(len(query_ids), dtype=np.float32))
+
             # Extract features for LightGBM
             X = np.column_stack([feat_dict[name] for name in feature_names])
             
@@ -144,6 +149,18 @@ def main():
             
             # Predict
             scores = model.predict(X)
+
+            # ── Rule-based override ─────────────────────────────────────────
+            # The base model is biased toward country_exact (trained on US/India).
+            # Override: if name strings are near-identical AND address partially
+            # overlaps, force a match regardless of the model's score.
+            # This recovers French entities the model unfairly penalises.
+            high_conf = (
+                ((name_jw > 0.97) & (addr_jac > 0.25)) |
+                (name_exact == 1.0)                          # exact name match always wins
+            )
+            scores = np.where(high_conf, 1.0, scores)
+            # ────────────────────────────────────────────────────────────────
             
             # Free X
             del X
