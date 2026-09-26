@@ -1,7 +1,7 @@
 """
 Kaggle GPU Standalone Execution Script: Retrieval Recall Optimization Suite (OOM-Safe)
 ===================================================================================
-This script is self-contained and memory-bounded for Kaggle GPU notebook execution (14-16GB VRAM).
+This script is self-contained and memory-bounded for Kaggle GPU notebook execution (14-16GB VRAM & 30GB RAM).
 
 Key Memory Management & OOM Prevention Features:
   1. Chunked Corpus Encoding: Encodes 10.3M corpus in 200,000 text chunks on CPU numpy.
@@ -11,6 +11,7 @@ Key Memory Management & OOM Prevention Features:
   5. Index Reuse: Reused across nprobe (128, 256, 512, 1024) and Top-K (50, 100, 200, 300) sweeps.
   6. Query Search Batching: Search executed in 4096-query batches to avoid FAISS GPU TemporaryMemoryOverflow.
   7. SentenceTransformer Unloading: Model freed from VRAM before search and TF-IDF steps.
+  8. Memory-Bounded TF-IDF: TF-IDF similarity computed in 50-query batches (~2.0 GB CPU RAM per batch).
 
 Run on Kaggle GPU (T4 / P100):
   python scripts/kaggle_retrieval_experiment_suite.py \
@@ -562,16 +563,22 @@ def main():
     )
     all_tfidf_texts = c_tfidf_texts + q_tfidf_texts
     tfidf.fit(all_tfidf_texts)
+    del all_tfidf_texts
+    gc.collect()
 
     c_tfidf_mat = tfidf.transform(c_tfidf_texts)
     q_tfidf_mat = tfidf.transform(q_tfidf_texts)
+    del c_tfidf_texts, q_tfidf_texts
+    gc.collect()
+
     print(f"TF-IDF matrix built: corpus={c_tfidf_mat.shape}, queries={q_tfidf_mat.shape} in {time.time()-t0_tfidf:.2f}s", flush=True)
 
     tfidf_top_k = 50
     t0_tfidf_search = time.time()
 
     tfidf_indices_list = []
-    query_batch_size = 500
+    # Mini-batch size of 50 queries keeps peak intermediate matrix at ~2.0 GB System RAM
+    query_batch_size = 50
     n_queries_tfidf = q_tfidf_mat.shape[0]
 
     print(f"Searching TF-IDF Top-{tfidf_top_k} for {n_queries_tfidf} queries...", flush=True)
@@ -582,7 +589,8 @@ def main():
         for row_idx in range(top_k_batch.shape[0]):
             row_sorted = top_k_batch[row_idx][np.argsort(sims[row_idx, top_k_batch[row_idx]])[::-1]]
             tfidf_indices_list.append(row_sorted)
-        if (i // query_batch_size) % 10 == 0:
+        del sims
+        if (i // query_batch_size) % 100 == 0:
             print(f"  TF-IDF searched {min(i + query_batch_size, n_queries_tfidf)}/{n_queries_tfidf} queries...", flush=True)
 
     tfidf_indices = np.vstack(tfidf_indices_list)
