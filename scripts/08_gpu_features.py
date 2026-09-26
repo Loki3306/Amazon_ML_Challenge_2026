@@ -10,7 +10,7 @@ import numpy as np
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--candidates-dir", type=str, default="data/candidates")
-    parser.add_argument("--data-dir", type=str, default="data/canonical")
+    parser.add_argument("--data-dir", type=str, default="data/processed/train")
     parser.add_argument("--ground-truth", type=str, required=True)
     parser.add_argument("--models-dir", type=str, default="data/models")
     return parser.parse_args()
@@ -62,8 +62,11 @@ def main():
     gt = load_gt(args.ground_truth)
     
     print("Loading entity tables to GPU...")
-    s1_df = cudf.read_parquet(os.path.join(args.data_dir, "train_s1.parquet"))
-    cand_df = cudf.read_parquet(os.path.join(args.data_dir, "train_candidates.parquet"))
+    s1_df = cudf.read_parquet(os.path.join(args.data_dir, "train_source1.parquet"))
+    s2 = cudf.read_parquet(os.path.join(args.data_dir, "train_source2.parquet"))
+    s3 = cudf.read_parquet(os.path.join(args.data_dir, "train_source3.parquet"))
+    cand_df = cudf.concat([s2, s3])
+    del s2, s3
     
     s1_df = s1_df[['entity_id', 'name_norm', 'address_norm']].rename(
         columns={'entity_id': 'query_id', 'name_norm': 'name_s1', 'address_norm': 'addr_s1'})
