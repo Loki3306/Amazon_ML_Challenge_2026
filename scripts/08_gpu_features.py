@@ -80,31 +80,42 @@ def main():
     
     all_features = []
     for p in train_shards:
-        print(f"Processing {p} on GPU...")
-        df = cudf.read_parquet(p)
-        df = df.merge(s1_df, on='query_id', how='inner')
-        df = df.merge(cand_df, on='candidate_id', how='inner')
+        print(f"Processing {p} on CPU first to prevent GPU OOM...")
+        import polars as pl
+        import pandas as pd
         
-        # Labeling (must do on CPU for dict lookup, then move to GPU)
-        pdf = df[['query_id', 'candidate_id']].to_pandas()
+        # Read candidate pairs on CPU
+        pairs = pl.read_parquet(p)
+        
+        # Label on CPU
+        print("  Labeling on CPU...")
+        pdf = pairs.to_pandas()
         labels = []
         for _, row in pdf.iterrows():
             q, c = str(row['query_id']), str(row['candidate_id'])
             labels.append(1 if q in gt and c in gt[q] else 0)
-        df['label'] = cudf.Series(labels, dtype=cp.int8)
+        pdf['label'] = labels
         
-        # Downsample negatives to save memory
-        pos = df[df['label'] == 1]
-        neg = df[df['label'] == 0]
+        # Downsample negatives on CPU BEFORE merging strings!
+        print("  Downsampling on CPU...")
+        pos = pdf[pdf['label'] == 1]
+        neg = pdf[pdf['label'] == 0]
         n_keep = max(len(pos), 1) * 10
         if len(neg) > n_keep:
             neg = neg.sample(n=n_keep, random_state=42)
-        df = cudf.concat([pos, neg])
+        
+        sampled_pdf = pd.concat([pos, neg])
+        del pdf, pos, neg, pairs; gc.collect()
+        
+        print("  Transferring downsampled data to GPU and merging...")
+        df = cudf.DataFrame.from_pandas(sampled_pdf)
+        df = df.merge(s1_df, on='query_id', how='inner')
+        df = df.merge(cand_df, on='candidate_id', how='inner')
         
         feat_df = compute_gpu_features(df)
         all_features.append(feat_df)
         
-        del df, pos, neg, pdf
+        del df, sampled_pdf
         gc.collect()
         
     print("Concatenating all features...")
