@@ -40,7 +40,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def search_index_batched(index, q_emb: np.ndarray, nprobe: int, top_k: int, batch_size: int = 4096):
+def search_index_batched(index, q_emb: np.ndarray, nprobe: int, top_k: int, batch_size: int = 65536):
     index.nprobe = min(nprobe, index.nlist if hasattr(index, 'nlist') else nprobe)
     faiss.omp_set_num_threads(os.cpu_count() or 4)
 
@@ -48,14 +48,19 @@ def search_index_batched(index, q_emb: np.ndarray, nprobe: int, top_k: int, batc
     num_queries = q_emb.shape[0]
     all_scores, all_indices = [], []
 
+    print(f"  Searching {num_queries:,} queries with nprobe={nprobe}, top_k={top_k}...", flush=True)
+
     for i in range(0, num_queries, batch_size):
         end = min(i + batch_size, num_queries)
         q_batch = q_emb[i:end].astype(np.float32)
         s_b, i_b = index.search(q_batch, top_k)
         all_scores.append(s_b)
         all_indices.append(i_b)
+        pct = (end / num_queries) * 100
+        print(f"    Progress: {end:,}/{num_queries:,} ({pct:.0f}%) queries searched [{time.time()-t0:.1f}s]", flush=True)
 
     return np.vstack(all_scores), np.vstack(all_indices), time.time() - t0
+
 
 
 def main():
