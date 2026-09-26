@@ -505,6 +505,8 @@ def generate_features(
                               f"{args.split}_dense_candidates_K50.parquet")
     exact_path = os.path.join(args.candidates_dir,
                               f"{args.split}_exact_candidates.parquet")
+    bm25_path = os.path.join(args.candidates_dir,
+                             f"{args.split}_bm25_candidates_name_word_K50.parquet")
 
     # ── Stream each parquet source in chunks ─────────────────────────────────
     sources = []
@@ -512,6 +514,8 @@ def generate_features(
         sources.append(("dense", dense_path))
     if os.path.exists(exact_path):
         sources.append(("exact", exact_path))
+    if os.path.exists(bm25_path):
+        sources.append(("bm25", bm25_path))
 
     for src_name, src_path in sources:
         log.info("Processing source: %s (%s)", src_name, src_path)
@@ -545,14 +549,20 @@ def generate_features(
                 needed += ["dense_score", "dense_rank"]
             chunk = chunk.select([c for c in needed if c in chunk.columns])
 
-            # Fill missing dense columns for exact-only rows
+            # Fill missing dense columns for exact-only or bm25-only rows
             if "dense_score" not in chunk.columns:
                 chunk = chunk.with_columns([
                     pl.lit(0.0).cast(pl.Float32).alias("dense_score"),
                     pl.lit(999).cast(pl.Int32).alias("dense_rank"),
                 ])
-            # retrieval_source: 0=dense, 1=exact
-            src_code = 0 if src_name == "dense" else 1
+            # retrieval_source: 0=dense, 1=exact, 2=bm25
+            if src_name == "dense":
+                src_code = 0
+            elif src_name == "exact":
+                src_code = 1
+            else:
+                src_code = 2
+            
             chunk = chunk.with_columns(
                 pl.lit(src_code).cast(pl.Int8).alias("retrieval_source")
             )

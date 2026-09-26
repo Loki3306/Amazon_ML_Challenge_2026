@@ -62,7 +62,8 @@ def main():
     # 3. Process Sources
     sources = [
         ("dense", os.path.join(args.candidates_dir, f"test_dense_candidates_K{args.top_k}.parquet")),
-        ("exact", os.path.join(args.candidates_dir, "test_exact_candidates.parquet"))
+        ("exact", os.path.join(args.candidates_dir, "test_exact_candidates.parquet")),
+        ("bm25", os.path.join(args.candidates_dir, f"test_bm25_candidates_name_word_K{args.top_k}.parquet"))
     ]
     
     # Open a temporary CSV to stream predictions and avoid RAM OOMs
@@ -97,7 +98,12 @@ def main():
             t_chunk = time.perf_counter()
             
             # Format retrieval_source
-            ret_src = 1.0 if source_name == "exact" else 0.0
+            if source_name == "dense":
+                ret_src = 0.0
+            elif source_name == "exact":
+                ret_src = 1.0
+            else:
+                ret_src = 2.0
             chunk = chunk.with_columns(pl.lit(ret_src).alias("retrieval_source"))
             
             # Missing columns fill
