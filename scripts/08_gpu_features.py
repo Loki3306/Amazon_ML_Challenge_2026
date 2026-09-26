@@ -19,15 +19,20 @@ def load_gt(path):
     import polars as pl
     print(f"Loading ground truth from {path}")
     df = pl.read_csv(path, separator="\t")
-    gt = {}
+    
+    rows = []
     for row in df.iter_rows(named=True):
         s1_id = str(row["source1_entity_id"])
         raw = row["matched_entity_ids"]
         if raw:
-            gt[s1_id] = set(str(x) for x in raw.split(","))
-        else:
-            gt[s1_id] = set()
-    return gt
+            for c in str(raw).split(","):
+                rows.append({"query_id": s1_id, "candidate_id": c})
+    
+    if not rows:
+        return pl.DataFrame({"query_id": [], "candidate_id": [], "label": []})
+        
+    gt_df = pl.DataFrame(rows).with_columns(pl.lit(1, dtype=pl.Int8).alias("label"))
+    return gt_df
 
 def compute_gpu_features(chunk: cudf.DataFrame) -> cudf.DataFrame:
     # Handle nulls
@@ -87,25 +92,25 @@ def main():
         # Read candidate pairs on CPU
         pairs = pl.read_parquet(p)
         
-        # Label on CPU
-        print("  Labeling on CPU...")
-        pdf = pairs.to_pandas()
-        labels = []
-        for _, row in pdf.iterrows():
-            q, c = str(row['query_id']), str(row['candidate_id'])
-            labels.append(1 if q in gt and c in gt[q] else 0)
-        pdf['label'] = labels
+        # Label on CPU instantly via join
+        print("  Labeling on CPU via Polars join...")
+        pairs = pairs.join(gt, on=['query_id', 'candidate_id'], how='left').with_columns(
+            pl.col("label").fill_null(0)
+        )
         
         # Downsample negatives on CPU BEFORE merging strings!
         print("  Downsampling on CPU...")
-        pos = pdf[pdf['label'] == 1]
-        neg = pdf[pdf['label'] == 0]
-        n_keep = max(len(pos), 1) * 10
-        if len(neg) > n_keep:
-            neg = neg.sample(n=n_keep, random_state=42)
+        pos = pairs.filter(pl.col("label") == 1)
+        neg = pairs.filter(pl.col("label") == 0)
         
-        sampled_pdf = pd.concat([pos, neg])
-        del pdf, pos, neg, pairs; gc.collect()
+        n_keep = max(pos.height, 1) * 10
+        if neg.height > n_keep:
+            # Polars random sample
+            neg = neg.sample(n=n_keep, seed=42)
+            
+        sampled = pl.concat([pos, neg])
+        sampled_pdf = sampled.to_pandas()
+        del pos, neg, pairs, sampled; gc.collect()
         
         print("  Transferring downsampled data to GPU and merging...")
         df = cudf.DataFrame.from_pandas(sampled_pdf)
