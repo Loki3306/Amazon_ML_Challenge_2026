@@ -208,6 +208,17 @@ class CandidateContractTests(unittest.TestCase):
     def test_num_retrievers_mismatch_is_rejected(self):
         self.assert_invalid(canonical_frame(canonical_row(num_retrievers=2)))
 
+    def test_candidate_without_retrieval_provenance_is_rejected(self):
+        self.assert_invalid(
+            canonical_frame(
+                canonical_row(
+                    found_by_exact=False,
+                    exact_name_match=False,
+                    num_retrievers=0,
+                )
+            )
+        )
+
     def test_null_keys_and_source_are_rejected(self):
         for column in ("query_id", "candidate_id", "candidate_source"):
             with self.subTest(column=column):

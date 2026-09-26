@@ -484,6 +484,10 @@ def validate_candidate_frame(
             )
 
         expected_count = sum(bool(row[name]) for name in PROVENANCE_COLUMNS)
+        if expected_count < 1:
+            raise CandidateContractError(
+                f"row {index}: canonical candidate has no retrieval provenance"
+            )
         if row["num_retrievers"] != expected_count:
             raise CandidateContractError(
                 f"row {index}: num_retrievers={row['num_retrievers']} "
