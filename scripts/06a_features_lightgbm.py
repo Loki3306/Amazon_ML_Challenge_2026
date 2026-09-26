@@ -43,8 +43,10 @@ import numpy as np
 import polars as pl
 import lightgbm as lgb
 from rapidfuzz import process as rf_process
-from rapidfuzz.distance import JaroWinkler, Jaro, Levenshtein
+from rapidfuzz.distance import JaroWinkler, Jaro, Levenshtein, QGram
+from rapidfuzz import fuzz
 import psutil
+import re
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -256,6 +258,12 @@ def fast_token_jaccard(s1_list, cand_list) -> np.ndarray:
         
     return np.array(list(map(jaccard, s1_sets, cand_sets)), dtype=np.float32)
 
+def fast_fuzz_set(s1_list, cand_list) -> np.ndarray:
+    return np.array([fuzz.token_set_ratio(a,b) for a,b in zip(s1_list, cand_list)], dtype=np.float32) / 100.0
+
+def fast_fuzz_sort(s1_list, cand_list) -> np.ndarray:
+    return np.array([fuzz.token_sort_ratio(a,b) for a,b in zip(s1_list, cand_list)], dtype=np.float32) / 100.0
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CORE FEATURE COMPUTATION  (one chunk)
@@ -294,6 +302,9 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
     name_jw  = np.ones(n, dtype=np.float32)
     name_lev = np.ones(n, dtype=np.float32)
     name_tok_jac = np.ones(n, dtype=np.float32)
+    name_tok_set = np.ones(n, dtype=np.float32)
+    name_tok_sort = np.ones(n, dtype=np.float32)
+    name_qgram = np.ones(n, dtype=np.float32)
 
     need_name = ~name_exact_mask
     if need_name.any():
@@ -304,11 +315,17 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         name_jw[idx]  = fast_paired_sim(s1_n_sub, cand_n_sub, JaroWinkler.normalized_similarity)
         name_lev[idx] = fast_paired_sim(s1_n_sub, cand_n_sub, Levenshtein.normalized_similarity)
         name_tok_jac[idx] = fast_token_jaccard(s1_n_sub, cand_n_sub)
+        name_tok_set[idx] = fast_fuzz_set(s1_n_sub, cand_n_sub)
+        name_tok_sort[idx] = fast_fuzz_sort(s1_n_sub, cand_n_sub)
+        name_qgram[idx] = fast_paired_sim(s1_n_sub, cand_n_sub, QGram.normalized_similarity)
 
     # ── G2: Address similarities ──────────────────────────────────────────────
     addr_jw  = np.ones(n, dtype=np.float32)
     addr_lev = np.ones(n, dtype=np.float32)
     addr_tok = np.ones(n, dtype=np.float32)
+    addr_tok_set = np.ones(n, dtype=np.float32)
+    addr_tok_sort = np.ones(n, dtype=np.float32)
+    addr_qgram = np.ones(n, dtype=np.float32)
 
     need_addr = ~addr_exact_mask
     if need_addr.any():
@@ -319,11 +336,33 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         addr_jw[idx_a]  = fast_paired_sim(s1_a_sub, cand_a_sub, JaroWinkler.normalized_similarity)
         addr_lev[idx_a] = fast_paired_sim(s1_a_sub, cand_a_sub, Levenshtein.normalized_similarity)
         addr_tok[idx_a] = fast_token_jaccard(s1_a_sub, cand_a_sub)
+        addr_tok_set[idx_a] = fast_fuzz_set(s1_a_sub, cand_a_sub)
+        addr_tok_sort[idx_a] = fast_fuzz_sort(s1_a_sub, cand_a_sub)
+        addr_qgram[idx_a] = fast_paired_sim(s1_a_sub, cand_a_sub, QGram.normalized_similarity)
 
     # ── G4: Retrieval signals (already numeric) ───────────────────────────────
     dense_scores = chunk["dense_score"].to_numpy().astype(np.float32)
     dense_ranks  = chunk["dense_rank"].to_numpy().astype(np.float32)
     ret_src      = chunk["retrieval_source"].to_numpy().astype(np.float32)
+
+    # ── G5: Numeric Mismatch (Address Killer) ─────────────────────────────────
+    num_regex = re.compile(r'\d+')
+    def has_num_mismatch(a, b):
+        nums_a = set(num_regex.findall(a))
+        nums_b = set(num_regex.findall(b))
+        if not nums_a or not nums_b: return 0.0 # missing numbers means no definitive mismatch
+        if nums_a.isdisjoint(nums_b): return 1.0 # 1.0 means MISMATCH
+        return 0.0
+    addr_num_mismatch = np.array([has_num_mismatch(a, b) for a, b in zip(s1_addrs, cand_addrs)], dtype=np.float32)
+
+    # ── G6: Length Ratios ─────────────────────────────────────────────────────
+    def len_ratio(a, b):
+        la, lb = len(a), len(b)
+        if la == 0 and lb == 0: return 1.0
+        if la == 0 or lb == 0: return 0.0
+        return min(la, lb) / max(la, lb)
+    name_len_ratio = np.array([len_ratio(a, b) for a, b in zip(s1_names, cand_names)], dtype=np.float32)
+    addr_len_ratio = np.array([len_ratio(a, b) for a, b in zip(s1_addrs, cand_addrs)], dtype=np.float32)
 
     return {
         # G1 name
@@ -331,28 +370,42 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         "name_jaro_winkler":  name_jw,
         "name_levenshtein":   name_lev,
         "name_token_jaccard": name_tok_jac,
+        "name_token_set":     name_tok_set,
+        "name_token_sort":    name_tok_sort,
+        "name_qgram":         name_qgram,
+        "name_len_ratio":     name_len_ratio,
+        
         # G2 address
         "addr_exact_norm":    addr_exact_norm,
         "addr_jaro_winkler":  addr_jw,
         "addr_levenshtein":   addr_lev,
         "addr_token_jaccard": addr_tok,
+        "addr_token_set":     addr_tok_set,
+        "addr_token_sort":    addr_tok_sort,
+        "addr_qgram":         addr_qgram,
+        "addr_len_ratio":     addr_len_ratio,
+        "addr_num_mismatch":  addr_num_mismatch,
+
         # G4 retrieval  (country_exact removed — hurts generalization to unseen countries)
         "dense_score":        dense_scores,
         "dense_rank":         dense_ranks,
         "dense_rank_inv":     1.0 / (dense_ranks + 1.0),
         "retrieval_source":   ret_src,
+        
         # G5 cross-field
         "name_jw_x_addr_jw":  name_jw * addr_jw,
+        "name_tok_set_x_addr_tok_set": name_tok_set * addr_tok_set,
+
     }
 
 
 FEATURE_COLS: list[str] = [
     "name_exact_norm", "name_jaro_winkler", "name_levenshtein",
-    "name_token_jaccard",
+    "name_token_jaccard", "name_token_set", "name_token_sort", "name_qgram", "name_len_ratio",
     "addr_exact_norm", "addr_jaro_winkler", "addr_levenshtein", "addr_token_jaccard",
-    # country_exact removed: overfits to train countries (US/India), fails on test (France)
+    "addr_token_set", "addr_token_sort", "addr_qgram", "addr_len_ratio", "addr_num_mismatch",
     "dense_score", "dense_rank", "dense_rank_inv", "retrieval_source",
-    "name_jw_x_addr_jw",
+    "name_jw_x_addr_jw", "name_tok_set_x_addr_tok_set",
 ]
 
 
