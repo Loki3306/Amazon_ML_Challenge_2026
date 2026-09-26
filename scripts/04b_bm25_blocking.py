@@ -314,21 +314,31 @@ def main():
     t0 = time.time()
     row_idxs, col_idxs, scores = chunked_topk_sparse(query_matrix, corpus_matrix_T, args.top_k, args.chunk_size, args.use_cupy)
     print(f"  Retrieval done in {time.time()-t0:.1f}s, {len(row_idxs)} raw pairs")
+    # Free up RAM aggressively before assembling results
     del query_matrix, corpus_matrix_T
     gc.collect()
 
-    corpus_ids_np = np.array(corpus_ids)
-    corpus_sources_np = np.array(corpus_sources)
-    query_ids_np = np.array(query_ids)
+    print("Assembling results via Polars joins to save RAM...")
+    q_map = pl.DataFrame({"query_idx": np.arange(len(query_ids), dtype=np.int32), "query_id": query_ids})
+    c_map = pl.DataFrame({"cand_idx": np.arange(len(corpus_ids), dtype=np.int32), "candidate_id": corpus_ids, "candidate_source": corpus_sources})
+    
+    del query_ids, corpus_ids, corpus_sources
+    gc.collect()
 
     out_df = pl.DataFrame({
-        "query_id": query_ids_np[row_idxs],
-        "candidate_id": corpus_ids_np[col_idxs],
-        "candidate_source": corpus_sources_np[col_idxs],
+        "query_idx": row_idxs,
+        "cand_idx": col_idxs,
         "bm25_score": scores,
         "found_by_bm25": True
     })
+    
+    del row_idxs, col_idxs, scores
+    gc.collect()
+
+    out_df = out_df.join(q_map, on="query_idx", how="left")
+    out_df = out_df.join(c_map, on="cand_idx", how="left")
     out_df = out_df.filter(pl.col("query_id") != pl.col("candidate_id"))
+    out_df = out_df.drop(["query_idx", "cand_idx"])
 
     output_path = os.path.join(args.output_dir, f"{args.split}_bm25_candidates_{config_name}.parquet")
     out_df.write_parquet(output_path, compression="snappy")
