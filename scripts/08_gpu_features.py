@@ -113,7 +113,7 @@ def main():
         del pos, neg, pairs, sampled; gc.collect()
         
         print("  Transferring downsampled data to GPU and merging...")
-        df = cudf.DataFrame.from_pandas(sampled_pdf)
+        df = cudf.DataFrame(sampled_pdf)
         df = df.merge(s1_df, on='query_id', how='inner')
         df = df.merge(cand_df, on='candidate_id', how='inner')
         
