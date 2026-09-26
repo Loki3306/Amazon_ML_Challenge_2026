@@ -104,21 +104,9 @@ def main():
     cpu_index = faiss.IndexIVFScalarQuantizer(quantizer, d, nlist, faiss.ScalarQuantizer.QT_8bit, faiss.METRIC_INNER_PRODUCT)
     
     t0 = time.time()
-    print(f"Training IVFFlat on 1,000,000 samples for {nlist} clusters...")
+    print(f"Training IVFFlat on 1,000,000 samples for {nlist} clusters (CPU)...")
     train_sample = memmap_array[:1_000_000].astype(np.float32)
-    
-    if device == "cuda":
-        # Train on a single GPU to be fast and safe
-        res = faiss.StandardGpuResources()
-        gpu_train_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
-        gpu_train_index.train(train_sample)
-        # Pull trained index back to CPU
-        cpu_index = faiss.index_gpu_to_cpu(gpu_train_index)
-        del gpu_train_index
-        del res
-        torch.cuda.empty_cache()
-    else:
-        cpu_index.train(train_sample)
+    cpu_index.train(train_sample)
         
     del train_sample
     print(f"Training completed in {time.time()-t0:.1f}s.")
