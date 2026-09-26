@@ -16,14 +16,17 @@ def parse_args():
     return parser.parse_args()
 
 def load_gt(path):
+    import polars as pl
+    print(f"Loading ground truth from {path}")
+    df = pl.read_csv(path, separator="\t")
     gt = {}
-    import pandas as pd
-    df = pd.read_csv(path, sep='\t')
-    for _, row in df.iterrows():
-        q, c = str(row.iloc[0]), str(row.iloc[1])
-        if q not in gt:
-            gt[q] = set()
-        gt[q].add(c)
+    for row in df.iter_rows(named=True):
+        s1_id = str(row["source1_entity_id"])
+        raw = row["matched_entity_ids"]
+        if raw:
+            gt[s1_id] = set(str(x) for x in raw.split(","))
+        else:
+            gt[s1_id] = set()
     return gt
 
 def compute_gpu_features(chunk: cudf.DataFrame) -> cudf.DataFrame:

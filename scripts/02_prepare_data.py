@@ -130,6 +130,7 @@ def main():
                     
     # Save the aggregated report
     report_path = os.path.join(args.artifacts_dir, "prepare_data_report.json")
+    os.makedirs(args.artifacts_dir, exist_ok=True)
     with open(report_path, "w") as f:
         json.dump({
             "timestamp": datetime.now().isoformat(),
