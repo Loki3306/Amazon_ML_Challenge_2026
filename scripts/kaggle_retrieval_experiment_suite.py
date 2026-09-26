@@ -81,10 +81,16 @@ def prepare_text(df: pl.DataFrame, representation: str) -> list[str]:
         raise ValueError(f"Unknown representation: {representation}")
 
 
+def get_model_dim(model) -> int:
+    if hasattr(model, "get_embedding_dimension"):
+        return model.get_embedding_dimension()
+    return model.get_sentence_embedding_dimension()
+
+
 def encode_texts_chunked(model, texts: list[str], batch_size: int = 2048, chunk_size: int = 200000) -> np.ndarray:
     """Encodes texts in chunks to prevent PyTorch CUDA OOM. Memory stays bounded to 1 batch."""
     n = len(texts)
-    dim = model.get_sentence_embedding_dimension()
+    dim = get_model_dim(model)
     embeddings = np.empty((n, dim), dtype=np.float32)
 
     for i in range(0, n, chunk_size):
@@ -102,6 +108,7 @@ def encode_texts_chunked(model, texts: list[str], batch_size: int = 2048, chunk_
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
+        print(f"    Encoded chunk {end:,}/{n:,} ({(end/n)*100:.1f}%)...", flush=True)
 
     return embeddings
 
@@ -109,14 +116,14 @@ def encode_texts_chunked(model, texts: list[str], batch_size: int = 2048, chunk_
 def build_and_populate_ivfflat_index(model, c_texts: list[str], nlist_target: int = 16384, chunk_size: int = 200000, batch_size: int = 2048):
     """Trains FAISS IVFFlat ONCE on a sample and populates it incrementally in chunks."""
     total_corpus = len(c_texts)
-    dim = model.get_sentence_embedding_dimension()
+    dim = get_model_dim(model)
     effective_nlist = min(nlist_target, max(16, total_corpus // 10))
 
-    print(f"  Sample-encoding {min(1000000, total_corpus):,} corpus texts for FAISS training...")
+    print(f"  Sample-encoding {min(1000000, total_corpus):,} corpus texts for FAISS training...", flush=True)
     train_sample_texts = c_texts[:min(1000000, total_corpus)]
     train_sample = encode_texts_chunked(model, train_sample_texts, batch_size=batch_size, chunk_size=chunk_size)
 
-    print(f"  Training FAISS IVFFlat Index (nlist={effective_nlist}, dim={dim})...")
+    print(f"  Training FAISS IVFFlat Index (nlist={effective_nlist}, dim={dim})...", flush=True)
     quantizer = faiss.IndexFlatIP(dim)
     cpu_index = faiss.IndexIVFFlat(quantizer, dim, effective_nlist, faiss.METRIC_INNER_PRODUCT)
 
@@ -134,16 +141,16 @@ def build_and_populate_ivfflat_index(model, c_texts: list[str], nlist_target: in
     del train_sample
     gc.collect()
 
-    print(f"  Populating FAISS index with {total_corpus:,} vectors in streaming {chunk_size:,} chunks...")
+    print(f"  Populating FAISS index with {total_corpus:,} vectors in streaming {chunk_size:,} chunks...", flush=True)
     if torch.cuda.is_available():
         co = faiss.GpuClonerOptions()
         co.useFloat16 = True
         try:
             res = faiss.StandardGpuResources()
             search_index = faiss.index_cpu_to_gpu(res, 0, cpu_index, co)
-            print("  FAISS index transferred to GPU (FP16 mode).")
+            print("  FAISS index transferred to GPU (FP16 mode).", flush=True)
         except Exception as e:
-            print(f"  GPU Index transfer warning ({e}). Using CPU Index...")
+            print(f"  GPU Index transfer warning ({e}). Using CPU Index...", flush=True)
             search_index = cpu_index
     else:
         search_index = cpu_index
@@ -165,8 +172,9 @@ def build_and_populate_ivfflat_index(model, c_texts: list[str], nlist_target: in
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
+        print(f"    Added chunk {end:,}/{total_corpus:,} ({(end/total_corpus)*100:.1f}%)...", flush=True)
 
-    print(f"  FAISS index populated in {time.time()-t0:.2f}s.")
+    print(f"  FAISS index populated in {time.time()-t0:.2f}s.", flush=True)
     return search_index, effective_nlist
 
 
