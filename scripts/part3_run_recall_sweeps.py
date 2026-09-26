@@ -37,7 +37,10 @@ def parse_args():
     parser.add_argument("--cache-dir", type=str, default="/kaggle/working/reports/retrieval/cache")
     parser.add_argument("--output-dir", type=str, default="/kaggle/working/reports/retrieval")
     parser.add_argument("--index-type", type=str, choices=["ivfflat", "ivfsq8"], default="ivfsq8")
+    parser.add_argument("--sample-size", type=int, default=100000,
+                        help="Number of queries to sample for ultra-fast recall sweeps (default: 100,000). Set to 0 to use all queries.")
     return parser.parse_args()
+
 
 
 def search_index_batched(index, q_emb: np.ndarray, nprobe: int, top_k: int, batch_size: int = 65536):
@@ -154,9 +157,20 @@ def main():
     print(f"Loading cached query embeddings from {q_emb_path}...", flush=True)
     q_emb = np.load(q_emb_path)
 
+    if args.sample_size > 0 and args.sample_size < len(q_emb):
+        print(f"\n[FAST SWEEP MODE] Sampling {args.sample_size:,} queries out of {len(q_emb):,} for 1-minute execution...", flush=True)
+        np.random.seed(42)
+        sample_indices = np.random.choice(len(q_emb), size=args.sample_size, replace=False)
+        q_emb = q_emb[sample_indices]
+        s1_ids = s1_ids[sample_indices]
+        valid_queries = [q for q in s1_ids if q in gt_dict_idx]
+        total_true_pairs = sum(len(gt_dict_idx[q]) for q in valid_queries)
+        print(f"Sampled {len(valid_queries):,} valid queries with {total_true_pairs:,} true pairs.", flush=True)
+
     print(f"Loading cached FAISS CPU index from {index_path}...", flush=True)
     index = faiss.read_index(index_path)
     print(f"FAISS index loaded with {index.ntotal:,} vectors.", flush=True)
+
 
     # 1. Nprobe Sweep (K=50)
     print("\n" + "=" * 60, flush=True)
