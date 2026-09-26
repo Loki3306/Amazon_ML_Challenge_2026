@@ -66,6 +66,7 @@ def parse_args():
     parser.add_argument("--cache-dir", type=str, default="/kaggle/working/reports/retrieval/cache", help="Disk checkpoint cache folder")
     parser.add_argument("--model-name", type=str, default="all-MiniLM-L6-v2", help="SentenceTransformer model")
     parser.add_argument("--index-type", type=str, choices=["ivfflat", "ivfsq8"], default="ivfsq8", help="FAISS CPU index type: 'ivfflat' (FP32) or 'ivfsq8' (8-bit Scalar Quantization)")
+    parser.add_argument("--stage", type=str, choices=["all", "queries", "corpus", "search"], default="all", help="Stage to run: 'all', 'queries' (encode queries only), 'corpus' (build index only), or 'search' (run sweeps using cached index/embeddings)")
     parser.add_argument("--n-queries", type=int, default=0, help="0 for full scale, >0 for subset benchmarking")
     parser.add_argument("--n-corpus", type=int, default=0, help="0 for full scale, >0 for subset benchmarking")
     parser.add_argument("--batch-size", type=int, default=2048, help="Batch size for model encoding")
@@ -382,9 +383,32 @@ def main():
     # 4. Primary Representation (name_address_country)
     rep_primary = "name_address_country"
     c_texts_primary = prepare_text(corpus_df, rep_primary)
-    
-    q_emb_primary = get_cached_query_embeddings(args.cache_dir, rep_primary, get_model, s1_df, args.batch_size, args.chunk_size)
     nlist_val = 16384 if len(corpus_ids) >= 500000 else max(16, len(corpus_ids) // 10)
+
+    if args.stage == "queries":
+        print("\n" + "="*75)
+        print(" RUNNING STAGE 1: ENCODE QUERIES ONLY")
+        print("="*75)
+        q_emb_primary = get_cached_query_embeddings(args.cache_dir, rep_primary, get_model, s1_df, args.batch_size, args.chunk_size)
+        print(f"\n[SUCCESS] Query embeddings encoded and saved to: {os.path.join(args.cache_dir, f'query_emb_{rep_primary}.npy')}")
+        print("You can now run `--stage corpus` or `--stage search` in subsequent executions!")
+        return
+
+    if args.stage == "corpus":
+        print("\n" + "="*75)
+        print(" RUNNING STAGE 2: BUILD & POPULATE CORPUS FAISS INDEX ONLY")
+        print("="*75)
+        index_primary, effective_nlist = get_cached_faiss_index(
+            args.cache_dir, rep_primary, get_model, c_texts_primary,
+            index_type=args.index_type, nlist_target=nlist_val,
+            chunk_size=args.chunk_size, batch_size=args.batch_size
+        )
+        print(f"\n[SUCCESS] Corpus FAISS index built and saved to: {os.path.join(args.cache_dir, f'faiss_index_{rep_primary}_{args.index_type}.index')}")
+        print("You can now run `--stage search` to perform fast recall sweeps!")
+        return
+
+    # For stage 'all' or 'search', load both query embeddings and FAISS index
+    q_emb_primary = get_cached_query_embeddings(args.cache_dir, rep_primary, get_model, s1_df, args.batch_size, args.chunk_size)
     index_primary, effective_nlist = get_cached_faiss_index(
         args.cache_dir, rep_primary, get_model, c_texts_primary,
         index_type=args.index_type, nlist_target=nlist_val,
