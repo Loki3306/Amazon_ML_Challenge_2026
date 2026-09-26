@@ -120,15 +120,16 @@ def evaluate_recall(gt_df: pl.DataFrame, cand_df: pl.DataFrame, name: str, basel
 
 
 def build_text_series(df: pl.DataFrame, fields: str) -> list[str]:
+    # Truncate strings to 1024 chars to prevent TfidfVectorizer from hanging on massive string anomalies
     if fields == "name":
-        return df["name_norm"].fill_null("").to_list()
+        return df["name_norm"].fill_null("").str.slice(0, 1024).to_list()
     elif fields == "address":
-        return df["address_norm"].fill_null("").to_list()
+        return df["address_norm"].fill_null("").str.slice(0, 1024).to_list()
     else:
         return df.select(
             pl.concat_str([
-                pl.col("name_norm").fill_null(""),
-                pl.col("address_norm").fill_null("")
+                pl.col("name_norm").fill_null("").str.slice(0, 1024),
+                pl.col("address_norm").fill_null("").str.slice(0, 1024)
             ], separator=" ")
         ).to_series().to_list()
 
