@@ -161,7 +161,7 @@ def main():
             print(f"  chunk_{i:05d}_{source_name} [{start_idx}+{chunk_size}] "
                   f"found {len(match_indices)} matches | {speed:.0f} rows/s")
                   
-    print(f"\nFeature generation & prediction complete in {time.time()-t0:.1f}s")
+    print(f"\nFeature generation & prediction complete!")
     
     # 4. Format Submission
     print(f"\nFormatting submission for {total_matches_found} matched pairs...")
