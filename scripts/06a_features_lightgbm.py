@@ -691,7 +691,7 @@ def train_lightgbm(args, train_shards: list[str], val_shards: list[str]) -> dict
         "min_child_samples": 50, "subsample": 0.8, "colsample_bytree": 0.8,
         "reg_alpha": 0.1, "reg_lambda": 0.1,
         "random_state": args.seed, "n_jobs": -1, "verbose": -1,
-        "device": device,
+        "device": "cpu", # Force CPU to avoid GPU zero-variance bug
     }
 
     lgb_tr  = lgb.Dataset(X_tr,  label=y_tr,  feature_name=FEATURE_COLS,
