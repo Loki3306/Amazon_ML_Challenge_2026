@@ -43,7 +43,7 @@ import numpy as np
 import polars as pl
 import lightgbm as lgb
 from rapidfuzz import process as rf_process
-from rapidfuzz.distance import JaroWinkler, Jaro, Levenshtein, QGram
+from rapidfuzz.distance import JaroWinkler, Jaro, Levenshtein
 from rapidfuzz import fuzz
 import psutil
 import re
@@ -317,7 +317,7 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         name_tok_jac[idx] = fast_token_jaccard(s1_n_sub, cand_n_sub)
         name_tok_set[idx] = fast_fuzz_set(s1_n_sub, cand_n_sub)
         name_tok_sort[idx] = fast_fuzz_sort(s1_n_sub, cand_n_sub)
-        name_qgram[idx] = fast_paired_sim(s1_n_sub, cand_n_sub, QGram.normalized_similarity)
+        name_qgram[idx] = 1.0 # Removed due to Kaggle version conflict
 
     # ── G2: Address similarities ──────────────────────────────────────────────
     addr_jw  = np.ones(n, dtype=np.float32)
@@ -338,7 +338,7 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         addr_tok[idx_a] = fast_token_jaccard(s1_a_sub, cand_a_sub)
         addr_tok_set[idx_a] = fast_fuzz_set(s1_a_sub, cand_a_sub)
         addr_tok_sort[idx_a] = fast_fuzz_sort(s1_a_sub, cand_a_sub)
-        addr_qgram[idx_a] = fast_paired_sim(s1_a_sub, cand_a_sub, QGram.normalized_similarity)
+        addr_qgram[idx_a] = 1.0 # Removed due to Kaggle version conflict
 
     # ── G4: Retrieval signals (already numeric) ───────────────────────────────
     dense_scores = chunk["dense_score"].to_numpy().astype(np.float32)
