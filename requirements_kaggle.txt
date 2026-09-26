@@ -1,8 +1,9 @@
 # Core Kaggle Requirements for Amazon ML Challenge 2026
 # (These match the Kaggle T4x2 environment where F0.5=0.8040 was achieved)
 
+# Install exactly one FAISS distribution.  The regeneration notebook prefers
+# the Kaggle-compatible GPU build and falls back to CPU APIs from that build.
 faiss-gpu
-faiss-cpu
 rapidfuzz
 sentence-transformers
 polars
@@ -14,3 +15,4 @@ sparse_dot_topn
 tqdm
 pyarrow
 fastparquet
+psutil

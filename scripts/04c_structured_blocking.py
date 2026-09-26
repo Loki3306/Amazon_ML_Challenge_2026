@@ -36,6 +36,10 @@ def parse_args():
     # Rarity threshold: tokens appearing in fewer than X entities are "rare" (discriminative)
     parser.add_argument("--rare-token-max-freq", type=int, default=500,
                         help="Max corpus frequency for a token to be considered 'rare'")
+    parser.add_argument("--diagnostics-only", action="store_true",
+                        help="Print block cardinality diagnostics and stop before joining")
+    parser.add_argument("--max-estimated-block-pairs", type=int, default=50_000_000,
+                        help="Safety threshold: stop rather than execute any larger legacy Cartesian block")
     return parser.parse_args()
 
 
@@ -174,6 +178,44 @@ def join_on_key(s1_df: pl.DataFrame, corpus_df: pl.DataFrame,
     return joined
 
 
+def block_diagnostics(s1_df: pl.DataFrame, corpus_df: pl.DataFrame,
+                      key_col: str, block_name: str) -> dict:
+    """Measure legacy join fan-out without materializing the Cartesian join."""
+    q = (s1_df
+         .filter(pl.col(key_col).is_not_null() & (pl.col(key_col) != ""))
+         .group_by(key_col).len().rename({"len": "query_rows"}))
+    c = (corpus_df
+         .filter(pl.col(key_col).is_not_null() & (pl.col(key_col) != ""))
+         .group_by(key_col).len().rename({"len": "corpus_rows"}))
+    postings = q.join(c, on=key_col, how="inner").with_columns(
+        (pl.col("query_rows").cast(pl.UInt64) * pl.col("corpus_rows").cast(pl.UInt64)).alias("join_pairs")
+    )
+    if postings.is_empty():
+        corpus_summary = c.select(
+            pl.col("corpus_rows").max().alias("max_posting_list"),
+            pl.col("corpus_rows").quantile(0.95, interpolation="nearest").alias("p95_posting_list"),
+            pl.col("corpus_rows").quantile(0.99, interpolation="nearest").alias("p99_posting_list"),
+        ).to_dicts()[0] if c.height else {}
+        return {
+            "block": block_name, "unique_keys": c.height,
+            "max_posting_list": int(corpus_summary.get("max_posting_list") or 0),
+            "p95_posting_list": int(corpus_summary.get("p95_posting_list") or 0),
+            "p99_posting_list": int(corpus_summary.get("p99_posting_list") or 0),
+            "estimated_largest_join_block": 0, "estimated_total_pairs": 0,
+        }
+    posting_summary = c.select(
+        pl.col("corpus_rows").max().alias("max_posting_list"),
+        pl.col("corpus_rows").quantile(0.95, interpolation="nearest").alias("p95_posting_list"),
+        pl.col("corpus_rows").quantile(0.99, interpolation="nearest").alias("p99_posting_list"),
+    ).to_dicts()[0]
+    join_summary = postings.select(
+        pl.col("join_pairs").max().alias("estimated_largest_join_block"),
+        pl.col("join_pairs").sum().alias("estimated_total_pairs"),
+    ).to_dicts()[0]
+    return {"block": block_name, "unique_keys": c.height,
+            **{key: int(value or 0) for key, value in {**posting_summary, **join_summary}.items()}}
+
+
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -290,6 +332,30 @@ def main():
         ("country_rare_name","country_rare_name",  "country_rare_name"),
         ("country_numeric",  "country_numeric",    "country_numeric"),
     ]
+
+    print("\nStructured block safety diagnostics:")
+    diagnostics = []
+    for s1_key, corpus_key, block_name in blocks:
+        if s1_key != corpus_key:
+            raise RuntimeError("diagnostics require identical legacy key names")
+        report = block_diagnostics(s1_keyed, corpus_keyed, s1_key, block_name)
+        diagnostics.append(report)
+        print(json.dumps(report, sort_keys=True))
+    unsafe = [
+        item for item in diagnostics
+        if item["estimated_largest_join_block"] > args.max_estimated_block_pairs
+    ]
+    diagnostics_path = os.path.join(args.artifacts_dir, f"{args.split}_structured_block_diagnostics.json")
+    with open(diagnostics_path, "w") as handle:
+        json.dump({"split": args.split, "rules": diagnostics, "unsafe": unsafe}, handle, indent=2)
+    if unsafe:
+        names = ", ".join(item["block"] for item in unsafe)
+        raise RuntimeError(
+            f"Unsafe legacy Cartesian block(s): {names}. No cap was applied; structured retrieval stopped."
+        )
+    if args.diagnostics_only:
+        print("Diagnostics-only mode complete; no candidate artifact was written.")
+        return
 
     all_frames = []
     for s1_key, corpus_key, block_name in blocks:

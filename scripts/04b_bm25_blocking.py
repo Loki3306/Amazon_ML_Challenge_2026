@@ -13,12 +13,20 @@ import time
 import argparse
 import gc
 import json
+import sys
 from datetime import datetime
 
 import numpy as np
 import polars as pl
 from sklearn.feature_extraction.text import TfidfVectorizer
 import scipy.sparse as sp
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "code", "business_entity_resolution", "src")))
+from business_entity_resolution.regeneration import (  # noqa: E402
+    enforce_memory_budget,
+    sparse_memory_projection,
+    write_sparse_candidates_from_texts,
+)
 
 
 def get_topk_fn(top_k: int):
@@ -56,6 +64,8 @@ def parse_args():
     parser.add_argument("--max-df", type=float, default=0.001, help="Drop terms in >X% of docs (removes stopwords)")
     parser.add_argument("--min-df", type=int, default=2)
     parser.add_argument("--use-cupy", action="store_true", help="Use CuPy for GPU-accelerated sparse matmul")
+    parser.add_argument("--max-memory-fraction", type=float, default=0.75,
+                        help="Refuse retrieval when projected working set exceeds this fraction of available RAM")
     return parser.parse_args()
 
 
@@ -293,8 +303,6 @@ def main():
     gc.collect()
 
     corpus_matrix_T = corpus_matrix.T.tocsr()
-    del corpus_matrix
-    gc.collect()
 
     print("Loading queries (S1)...")
     s1_df = pl.read_parquet(s1_path, columns=select_cols)
@@ -303,40 +311,42 @@ def main():
     del s1_df
     gc.collect()
 
-    print(f"Transforming {len(query_texts)} queries...")
-    t0 = time.time()
-    query_matrix = vectorizer.transform(query_texts).tocsr()
-    print(f"  Query matrix: {query_matrix.shape}, time={time.time()-t0:.1f}s")
-    del query_texts
+    if args.use_cupy:
+        raise ValueError("--use-cupy is disabled for regeneration: the bounded CPU path preserves legacy sparse_dot_topn semantics")
+    sample_size = min(len(query_texts), args.chunk_size)
+    query_sample = vectorizer.transform(query_texts[:sample_size]).tocsr()
+    projection = sparse_memory_projection(
+        corpus_matrix, corpus_matrix_T, query_sample, len(query_ids), args.top_k, args.chunk_size
+    )
+    enforce_memory_budget(projection, args.max_memory_fraction)
+    del corpus_matrix, query_sample
     gc.collect()
 
-    print(f"Computing Top-{args.top_k} in chunks of {args.chunk_size}...")
+    print(f"Computing Top-{args.top_k} in bounded chunks of {args.chunk_size}...")
     t0 = time.time()
-    row_idxs, col_idxs, scores = chunked_topk_sparse(query_matrix, corpus_matrix_T, args.top_k, args.chunk_size, args.use_cupy)
-    print(f"  Retrieval done in {time.time()-t0:.1f}s, {len(row_idxs)} raw pairs")
-    del query_matrix, corpus_matrix_T
-    gc.collect()
-
-    corpus_ids_np = np.array(corpus_ids)
-    corpus_sources_np = np.array(corpus_sources)
-    query_ids_np = np.array(query_ids)
-
-    out_df = pl.DataFrame({
-        "query_id": query_ids_np[row_idxs],
-        "candidate_id": corpus_ids_np[col_idxs],
-        "candidate_source": corpus_sources_np[col_idxs],
-        "bm25_score": scores,
-        "found_by_bm25": True
-    })
-    out_df = out_df.filter(pl.col("query_id") != pl.col("candidate_id"))
-
     output_path = os.path.join(args.output_dir, f"{args.split}_bm25_candidates_{config_name}.parquet")
-    out_df.write_parquet(output_path, compression="snappy")
-    print(f"Saved {out_df.height} candidates to {output_path}")
+    rows_written = write_sparse_candidates_from_texts(
+        output_path=output_path,
+        vectorizer=vectorizer,
+        query_texts=query_texts,
+        corpus_matrix_t=corpus_matrix_T,
+        query_ids=np.asarray(query_ids),
+        corpus_ids=np.asarray(corpus_ids),
+        corpus_sources=np.asarray(corpus_sources),
+        top_k=args.top_k,
+        chunk_size=args.chunk_size,
+        score_column="bm25_score",
+        flag_column="found_by_bm25",
+    )
+    print(f"  Retrieval and streaming write done in {time.time()-t0:.1f}s")
+    print(f"Saved {rows_written} candidates to {output_path}")
+    del query_texts, corpus_matrix_T
+    gc.collect()
 
     if args.ground_truth and os.path.exists(args.ground_truth) and args.split == "train":
         print("\nEvaluating recall...")
         gt_df = load_ground_truth(args.ground_truth)
+        out_df = pl.read_parquet(output_path)
 
         baseline_pairs = None
         dense_path = os.path.join(args.baseline_dir, "train_dense_candidates_K50.parquet")
