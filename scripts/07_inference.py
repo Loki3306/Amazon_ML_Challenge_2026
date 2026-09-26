@@ -60,10 +60,17 @@ def main():
     s1_df, cand_df = load_entity_tables(args.data_dir, "test")
     t0 = time.time()
     
-    # 3. Process Sources
-    sources = [
-        ("bm25", os.path.join(args.candidates_dir, f"test_bm25_candidates_name_word_K{args.top_k}.parquet"))
-    ]
+    # 3. Process Sources — score ALL candidate files (exact + BM25)
+    sources = []
+    exact_path = os.path.join(args.candidates_dir, "test_exact_candidates.parquet")
+    bm25_path  = os.path.join(args.candidates_dir, f"test_bm25_candidates_name_word_K{args.top_k}.parquet")
+    if os.path.exists(exact_path):
+        sources.append(("exact", exact_path))
+    if os.path.exists(bm25_path):
+        sources.append(("bm25", bm25_path))
+    if not sources:
+        print("ERROR: No candidate files found. Run 03_exact_blocking.py and/or 04b_bm25_blocking.py on test split first.")
+        return
     
     # Open a temporary CSV to stream predictions and avoid RAM OOMs
     temp_csv_path = os.path.join(args.output_csv + ".tmp")
