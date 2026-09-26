@@ -270,22 +270,53 @@ def fast_fuzz_sort(s1_list, cand_list) -> np.ndarray:
 # CORE FEATURE COMPUTATION  (one chunk)
 # ──────────────────────────────────────────────────────────────────────────────
 def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, np.ndarray]:
-    """
-    chunk has columns:
-        s1_name, s1_addr, s1_country,
-        cand_name, cand_addr, cand_country,
-        dense_score, dense_rank, retrieval_source
-    Returns dict  feature_name → float32 ndarray of length n
-    """
     n = chunk.height
 
-    # Pull out Python lists once
+    # Extract all lists in the MAIN thread to avoid Polars multithreading fork deadlocks
     s1_names   = chunk["s1_name"].fill_null("").to_list()
     cand_names = chunk["cand_name"].fill_null("").to_list()
     s1_addrs   = chunk["s1_addr"].fill_null("").to_list()
     cand_addrs = chunk["cand_addr"].fill_null("").to_list()
     s1_ctrs    = chunk["s1_country"].fill_null("").to_list()
     cand_ctrs  = chunk["cand_country"].fill_null("").to_list()
+    
+    dense_scores = chunk["dense_score"].to_numpy().astype(np.float32)
+    dense_ranks  = chunk["dense_rank"].to_numpy().astype(np.float32)
+    ret_src      = chunk["retrieval_source"].to_numpy().astype(np.float32)
+
+    n_cores = os.cpu_count() or 1
+    if workers > 0: 
+        n_cores = workers
+
+    if n_cores > 1 and n > 20_000:
+        sub_size = (n + n_cores - 1) // n_cores
+        args_list = []
+        for i in range(0, n, sub_size):
+            args_list.append((
+                s1_names[i:i+sub_size], cand_names[i:i+sub_size],
+                s1_addrs[i:i+sub_size], cand_addrs[i:i+sub_size],
+                s1_ctrs[i:i+sub_size], cand_ctrs[i:i+sub_size],
+                dense_scores[i:i+sub_size], dense_ranks[i:i+sub_size], ret_src[i:i+sub_size]
+            ))
+            
+        with ProcessPoolExecutor(max_workers=n_cores) as pool:
+            sub_feats = list(pool.map(_compute_features_wrapper, args_list))
+            
+        return {k: np.concatenate([sf[k] for sf in sub_feats]) for k in sub_feats[0].keys()}
+    else:
+        return _compute_features_from_lists(
+            s1_names, cand_names, s1_addrs, cand_addrs, s1_ctrs, cand_ctrs,
+            dense_scores, dense_ranks, ret_src
+        )
+
+def _compute_features_wrapper(args):
+    return _compute_features_from_lists(*args)
+
+def _compute_features_from_lists(
+    s1_names, cand_names, s1_addrs, cand_addrs, s1_ctrs, cand_ctrs,
+    dense_scores, dense_ranks, ret_src
+) -> dict[str, np.ndarray]:
+    n = len(s1_names)
 
     # ── G3: Country (trivially cheap, do first) ──────────────────────────────
     country_exact = np.array(
@@ -342,9 +373,7 @@ def compute_features_for_chunk(chunk: pl.DataFrame, workers: int) -> dict[str, n
         addr_qgram[idx_a] = 1.0 # Removed due to Kaggle version conflict
 
     # ── G4: Retrieval signals (already numeric) ───────────────────────────────
-    dense_scores = chunk["dense_score"].to_numpy().astype(np.float32)
-    dense_ranks  = chunk["dense_rank"].to_numpy().astype(np.float32)
-    ret_src      = chunk["retrieval_source"].to_numpy().astype(np.float32)
+    # (dense_scores, dense_ranks, ret_src are passed in directly)
 
     # ── G5: Numeric Mismatch (Address Killer) ─────────────────────────────────
     num_regex = re.compile(r'\d+')
@@ -631,27 +660,9 @@ def generate_features(
                         "cand_name", "cand_addr", "cand_country"]:
                 chunk = chunk.with_columns(pl.col(col).fill_null(""))
 
-            # ── Compute features (parallelised across all CPU cores) ────────
-            # ProcessPoolExecutor fork-safe: compute_features_for_chunk is pure.
-            n_cores = os.cpu_count() or 1
-            if args.workers > 0:
-                n_cores = args.workers
-            if n_cores > 1 and chunk.height > 20_000:
-                sub_size  = (chunk.height + n_cores - 1) // n_cores
-                sub_chunks = [chunk.slice(i, sub_size)
-                              for i in range(0, chunk.height, sub_size)]
-                with ProcessPoolExecutor(max_workers=n_cores) as pool:
-                    futs = [
-                        pool.submit(compute_features_for_chunk, sc, 1)
-                        for sc in sub_chunks
-                    ]
-                    sub_feats = [f.result() for f in futs]
-                feats = {
-                    k: np.concatenate([sf[k] for sf in sub_feats])
-                    for k in sub_feats[0].keys()
-                }
-            else:
-                feats = compute_features_for_chunk(chunk, workers=1)
+            # ── Compute features ────────
+            # Internally parallelizes across lists to prevent Polars fork deadlocks
+            feats = compute_features_for_chunk(chunk, workers=args.workers)
 
             # Assemble shard
             shard_data: dict[str, Any] = {
