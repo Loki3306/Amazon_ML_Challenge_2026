@@ -405,8 +405,17 @@ def main():
     
     import gc
     del X_train, y_train
-    if 'train_cross_scores' in dir(): del train_cross_scores
-    if 'cross_pairs_train' in dir(): del cross_pairs_train
+    if 'train_cross_scores' in locals(): del train_cross_scores
+    if 'cross_pairs_train' in locals(): del cross_pairs_train
+    
+    # Aggressive memory clearing to prevent 30GB OOM on Kaggle
+    if 's1_embeddings' in locals(): del s1_embeddings
+    if 't_embeddings' in locals(): del t_embeddings
+    if 's1_addr_embeddings' in locals(): del s1_addr_embeddings
+    if 't_addr_embeddings' in locals(): del t_addr_embeddings
+    if 'faiss_index' in locals(): del faiss_index
+    if 'cross_encoder' in locals(): del cross_encoder
+    
     gc.collect()
 
     # 7. Evaluate on Large Held-out Validation Set
