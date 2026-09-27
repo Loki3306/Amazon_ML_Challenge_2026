@@ -370,8 +370,6 @@ def main():
     # 6. Fit Production Model (GPU Accelerated if xgboost_gpu)
     print(f'Training production {args.model_type} model on {"NVIDIA GPU (CUDA)" if "gpu" in args.model_type else "CPU"}...')
     t_train_start = time.time()
-    scale_weight = float(neg_count) / float(pos_count) if pos_count > 0 else 1.0
-    print(f'Applying scale_pos_weight = {scale_weight:.2f} for class imbalance...')
     
     final_model = EntityMatcherModel(
         args.model_type,
@@ -379,8 +377,7 @@ def main():
         learning_rate=0.035,
         max_depth=9,
         subsample=0.85,
-        colsample_bytree=0.85,
-        scale_pos_weight=scale_weight
+        colsample_bytree=0.85
     )
     final_model.fit(X_train, y_train)
     print(f'Model trained in {time.time()-t_train_start:.1f}s.')
@@ -478,8 +475,8 @@ def main():
     best_s3 = 0.50
     best_metrics = None
 
-    for t2 in np.linspace(0.40, 0.90, 11):
-        for t3 in np.linspace(0.40, 0.90, 11):
+    for t2 in np.linspace(0.40, 0.99, 15):
+        for t3 in np.linspace(0.40, 0.99, 15):
             preds = apply_threshold_and_deduplication(scores_dict, t2, t3)
             metrics = evaluate_predictions(val_gt, preds)
             if metrics['macro_f05'] > best_f05:
