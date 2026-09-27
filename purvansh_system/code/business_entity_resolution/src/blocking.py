@@ -243,8 +243,8 @@ def shard_streaming_tfidf_blocking(
                 scores_dense = scores_gpu.toarray()
                 k = min(top_k, scores_dense.shape[1])
                 
-                # Get top-k indices and scores on GPU
-                top_idx_gpu = cp.argpartition(scores_dense, -k, axis=1)[:, -k:]
+                # Get top-k indices and scores on GPU using argsort (argpartition can hang in CuPy)
+                top_idx_gpu = cp.argsort(scores_dense, axis=1)[:, -k:]
                 top_scores_gpu = cp.take_along_axis(scores_dense, top_idx_gpu, axis=1)
                 
                 # Transfer tiny arrays (batch_size x k) to CPU
