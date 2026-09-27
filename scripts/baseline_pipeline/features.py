@@ -48,7 +48,10 @@ FEATURE_NAMES = [
     'addr_phonetic_match',
     'zip_code_match',
     'name_tfidf_sim',
-    'name_semantic_sim'
+    'name_semantic_sim',
+    'is_addr_missing',
+    'is_name_missing',
+    'is_pnum_missing'
 ]
 
 
@@ -66,6 +69,10 @@ def extract_features_for_pair(s1_tuple, target_tuple, target_id, shared_keys=1, 
     """
     s1_name, s1_core, s1_addr, s1_nums, s1_pnum = s1_tuple
     t_name, t_core, t_addr, t_nums, t_pnum = target_tuple
+    
+    is_addr_missing = 1.0 if not s1_addr or not t_addr else 0.0
+    is_name_missing = 1.0 if not s1_name or not t_name else 0.0
+    is_pnum_missing = 1.0 if s1_pnum is None or t_pnum is None else 0.0
 
     # 1. Name features
     exact_clean = 1.0 if s1_name == t_name and s1_name else 0.0
@@ -230,5 +237,8 @@ def extract_features_for_pair(s1_tuple, target_tuple, target_id, shared_keys=1, 
         addr_phonetic_match,
         zip_code_match,
         float(tfidf_sim),
-        float(semantic_sim)
+        float(semantic_sim),
+        is_addr_missing,
+        is_name_missing,
+        is_pnum_missing
     ]
