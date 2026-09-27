@@ -404,7 +404,9 @@ def main():
     print(f'Model trained in {time.time()-t_train_start:.1f}s.')
     
     import gc
-    del X_train, y_train, train_cross_scores, cross_pairs_train
+    del X_train, y_train
+    if 'train_cross_scores' in dir(): del train_cross_scores
+    if 'cross_pairs_train' in dir(): del cross_pairs_train
     gc.collect()
 
     # 7. Evaluate on Large Held-out Validation Set
