@@ -1,6 +1,8 @@
 import sys
 import math
 import numpy as np
+import re
+import jellyfish
 from rapidfuzz import fuzz
 from rapidfuzz.distance import Levenshtein, JaroWinkler
 import normalization as norm
@@ -41,7 +43,10 @@ FEATURE_NAMES = [
     'name_high_but_num_conflict',
     'is_source2',
     'is_source3',
-    'shared_keys_count'
+    'shared_keys_count',
+    'name_phonetic_match',
+    'addr_phonetic_match',
+    'zip_code_match'
 ]
 
 
@@ -63,6 +68,10 @@ def extract_features_for_pair(s1_tuple, target_tuple, target_id, shared_keys=1):
     # 1. Name features
     exact_clean = 1.0 if s1_name == t_name and s1_name else 0.0
     exact_core = 1.0 if s1_core == t_core and s1_core else 0.0
+
+    s1_phon = jellyfish.metaphone(s1_name) if s1_name else ""
+    t_phon = jellyfish.metaphone(t_name) if t_name else ""
+    name_phonetic_match = 1.0 if s1_phon and t_phon and s1_phon == t_phon else 0.0
 
     n_lev = Levenshtein.normalized_similarity(s1_name, t_name) if s1_name and t_name else 0.0
     n_jw = JaroWinkler.similarity(s1_name, t_name) if s1_name and t_name else 0.0
@@ -119,6 +128,18 @@ def extract_features_for_pair(s1_tuple, target_tuple, target_id, shared_keys=1):
         a_union = len(s1_a_toks | t_a_toks)
         a_jaccard = len(s1_a_toks & t_a_toks) / a_union if a_union > 0 else 0.0
 
+        s1_a_phon = jellyfish.metaphone(s1_addr) if s1_addr else ""
+        t_a_phon = jellyfish.metaphone(t_addr) if t_addr else ""
+        addr_phonetic_match = 1.0 if s1_a_phon and t_a_phon and s1_a_phon == t_a_phon else 0.0
+
+        zip_pattern = r'\b(\d{5,6})\b'
+        s1_zips = set(re.findall(zip_pattern, s1_addr))
+        t_zips = set(re.findall(zip_pattern, t_addr))
+        if s1_zips and t_zips:
+            zip_code_match = 1.0 if len(s1_zips & t_zips) > 0 else -1.0
+        else:
+            zip_code_match = 0.0
+
         # Number overlap
         shared_nums = len(s1_nums & t_nums)
         has_num_match = 1.0 if shared_nums > 0 else 0.0
@@ -143,6 +164,8 @@ def extract_features_for_pair(s1_tuple, target_tuple, target_id, shared_keys=1):
         a_sort = 0.0
         a_set = 0.0
         a_jaccard = 0.0
+        addr_phonetic_match = 0.0
+        zip_code_match = 0.0
         shared_nums = 0
         has_num_match = 0.0
         has_num_mismatch = 0.0
@@ -200,5 +223,8 @@ def extract_features_for_pair(s1_tuple, target_tuple, target_id, shared_keys=1):
         name_high_but_num_conflict,
         is_s2,
         is_s3,
-        float(shared_keys)
+        float(shared_keys),
+        name_phonetic_match,
+        addr_phonetic_match,
+        zip_code_match
     ]
