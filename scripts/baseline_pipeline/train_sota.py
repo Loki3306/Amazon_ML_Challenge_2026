@@ -308,41 +308,41 @@ def main():
                     cands.append((tid, 1))
                     cand_mids[tid] = 1
 
-        s1_tup = s1_preprocessed[sid][:5]
-        sid_idx = s1_id_to_idx[sid]
-        s1_vec = s1_tfidf_mat[sid_idx]
+            s1_tup = s1_preprocessed[sid][:5]
+            sid_idx = s1_id_to_idx[sid]
+            s1_vec = s1_tfidf_mat[sid_idx]
 
-        for mid in true_mids:
-            if mid in target_preprocessed:
-                t_tup = target_preprocessed[mid][:5]
-                sh = cand_mids.get(mid, 1)
-                t_idx = target_id_to_idx[mid]
-                t_vec = target_tfidf_mat[t_idx]
-                tfidf_sim = float(s1_vec.multiply(t_vec).sum())
-                semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
-                addr_semantic_sim = float(np.dot(s1_addr_embeddings[sid_idx], t_addr_embeddings[t_idx]))
-                feats = extract_features_for_pair(s1_tup, t_tup, mid, sh, tfidf_sim, semantic_sim, addr_semantic_sim, 0.0)
-                local_X.append(feats)
-                local_y.append(1)
-                local_cross_pairs.append([s1_combined[sid_idx], target_combined[t_idx]])
+            for mid in true_mids:
+                if mid in target_preprocessed:
+                    t_tup = target_preprocessed[mid][:5]
+                    sh = cand_mids.get(mid, 1)
+                    t_idx = target_id_to_idx[mid]
+                    t_vec = target_tfidf_mat[t_idx]
+                    tfidf_sim = float(s1_vec.multiply(t_vec).sum())
+                    semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
+                    addr_semantic_sim = float(np.dot(s1_addr_embeddings[sid_idx], t_addr_embeddings[t_idx]))
+                    feats = extract_features_for_pair(s1_tup, t_tup, mid, sh, tfidf_sim, semantic_sim, addr_semantic_sim, 0.0)
+                    local_X.append(feats)
+                    local_y.append(1)
+                    local_cross_pairs.append([s1_combined[sid_idx], target_combined[t_idx]])
 
-        neg_count = 0
-        for tid, sh in cands:
-            if tid not in true_mids and tid in target_preprocessed:
-                t_tup = target_preprocessed[tid][:5]
-                t_idx = target_id_to_idx[tid]
-                t_vec = target_tfidf_mat[t_idx]
-                tfidf_sim = float(s1_vec.multiply(t_vec).sum())
-                semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
-                addr_semantic_sim = float(np.dot(s1_addr_embeddings[sid_idx], t_addr_embeddings[t_idx]))
-                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim, semantic_sim, addr_semantic_sim, 0.0)
-                local_X.append(feats)
-                local_y.append(0)
-                local_cross_pairs.append([s1_combined[sid_idx], target_combined[t_idx]])
-                neg_count += 1
-                if neg_count >= max(20, len(true_mids) * 5):
-                    break
-        return local_X, local_y, local_cross_pairs
+            neg_count = 0
+            for tid, sh in cands:
+                if tid not in true_mids and tid in target_preprocessed:
+                    t_tup = target_preprocessed[tid][:5]
+                    t_idx = target_id_to_idx[tid]
+                    t_vec = target_tfidf_mat[t_idx]
+                    tfidf_sim = float(s1_vec.multiply(t_vec).sum())
+                    semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
+                    addr_semantic_sim = float(np.dot(s1_addr_embeddings[sid_idx], t_addr_embeddings[t_idx]))
+                    feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim, semantic_sim, addr_semantic_sim, 0.0)
+                    local_X.append(feats)
+                    local_y.append(0)
+                    local_cross_pairs.append([s1_combined[sid_idx], target_combined[t_idx]])
+                    neg_count += 1
+                    if neg_count >= max(20, len(true_mids) * 5):
+                        break
+            return local_X, local_y, local_cross_pairs
 
     from joblib import Parallel, delayed
     results = Parallel(n_jobs=-1, backend='threading')(
