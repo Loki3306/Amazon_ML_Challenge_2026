@@ -8,6 +8,7 @@ import numpy as np
 import joblib
 import faiss
 from sklearn.feature_extraction.text import TfidfVectorizer
+import math
 from sentence_transformers import SentenceTransformer, CrossEncoder
 
 # Ensure scripts/akash is in python path
