@@ -242,19 +242,21 @@ def main():
 
     print('Extracting features for training pairs (including hard negatives)...')
     t_feat_start = time.time()
+    train_target_set = set(target_preprocessed.keys())
     X_train = []
     y_train = []
-    train_target_set = set(target_preprocessed.keys())
 
-    for sid in train_s1_ids:
+    def process_train_sid(sid):
+        local_X = []
+        local_y = []
         true_mids = train_gt.get(sid, set()) & train_target_set
         cands = get_candidates(sid, top_k=20)
         cand_mids = {tid: count for tid, count in cands}
         
         # Inject Semantic Candidates
-        for tid, score in faiss_cands[sid]:
+        for tid, score in faiss_cands.get(sid, []):
             if tid not in cand_mids:
-                cands.append((tid, 1)) # Add to candidates list with fake count 1
+                cands.append((tid, 1))
                 cand_mids[tid] = 1
 
         s1_tup = s1_preprocessed[sid][:5]
@@ -270,11 +272,9 @@ def main():
                 tfidf_sim = float(s1_vec.multiply(t_vec).sum())
                 semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
                 feats = extract_features_for_pair(s1_tup, t_tup, mid, sh, tfidf_sim, semantic_sim)
-                X_train.append(feats)
-                y_train.append(1)
+                local_X.append(feats)
+                local_y.append(1)
 
-        # Mine hard negatives:
-        # 1. Candidates that share keys with S1 but are NOT true matches
         neg_count = 0
         for tid, sh in cands:
             if tid not in true_mids and tid in target_preprocessed:
@@ -284,11 +284,21 @@ def main():
                 tfidf_sim = float(s1_vec.multiply(t_vec).sum())
                 semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
                 feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim, semantic_sim)
-                X_train.append(feats)
-                y_train.append(0)
+                local_X.append(feats)
+                local_y.append(0)
                 neg_count += 1
                 if neg_count >= max(3, len(true_mids) * 3):
                     break
+        return local_X, local_y
+
+    from joblib import Parallel, delayed
+    results = Parallel(n_jobs=-1, backend='threading')(
+        delayed(process_train_sid)(sid) for sid in train_s1_ids
+    )
+    
+    for rx, ry in results:
+        X_train.extend(rx)
+        y_train.extend(ry)
 
     X_train = np.array(X_train, dtype=np.float32)
     y_train = np.array(y_train, dtype=np.int32)
@@ -316,7 +326,9 @@ def main():
     retrieved_val_true = 0
     total_val_true = sum(len(v) for v in val_gt.values())
 
-    for sid in val_s1_ids:
+    def process_val_sid(sid):
+        local_pairs = []
+        local_retrieved_val_true = 0
         cands = get_candidates(sid, top_k=20)
         cand_ids = [tid for tid, _ in cands]
         
@@ -328,7 +340,7 @@ def main():
                 cand_ids.append(tid)
                 cand_mids.add(tid)
                 
-        retrieved_val_true += len(val_gt[sid] & set(cand_ids))
+        local_retrieved_val_true += len(val_gt[sid] & set(cand_ids))
 
         s1_tup = s1_preprocessed[sid][:5]
         sid_idx = s1_id_to_idx[sid]
@@ -342,7 +354,18 @@ def main():
                 tfidf_sim = float(s1_vec.multiply(t_vec).sum())
                 semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
                 feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim, semantic_sim)
-                val_pair_list.append((sid, tid, feats, s1_tup, t_tup))
+                local_pairs.append((sid, tid, feats, s1_tup, t_tup))
+        return local_retrieved_val_true, local_pairs
+
+    val_results = Parallel(n_jobs=-1, backend='threading')(
+        delayed(process_val_sid)(sid) for sid in val_s1_ids
+    )
+    
+    retrieved_val_true = 0
+    val_pair_list = []
+    for rv_true, rv_pairs in val_results:
+        retrieved_val_true += rv_true
+        val_pair_list.extend(rv_pairs)
 
     X_val = np.array([p[2] for p in val_pair_list], dtype=np.float32)
     val_probas = final_model.predict_proba(X_val)
