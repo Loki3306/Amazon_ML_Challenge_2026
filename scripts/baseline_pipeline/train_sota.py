@@ -384,6 +384,10 @@ def main():
     )
     final_model.fit(X_train, y_train)
     print(f'Model trained in {time.time()-t_train_start:.1f}s.')
+    
+    import gc
+    del X_train, y_train, train_cross_scores, cross_pairs_train
+    gc.collect()
 
     # 7. Evaluate on Large Held-out Validation Set
     print('Evaluating on held-out validation set...')
@@ -429,9 +433,10 @@ def main():
                 local_cross_pairs.append([s1_name_combined, target_name_combined])
         return local_retrieved_val_true, local_pairs, local_cross_pairs
 
-    val_results = Parallel(n_jobs=-1, backend='threading')(
-        delayed(process_val_sid)(sid) for sid in val_s1_ids
-    )
+    val_results = []
+    from tqdm import tqdm
+    for sid in tqdm(val_s1_ids, desc='Extracting validation features'):
+        val_results.append(process_val_sid(sid))
     
     retrieved_val_true = 0
     val_pair_list = []
