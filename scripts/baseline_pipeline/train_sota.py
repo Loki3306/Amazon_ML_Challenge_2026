@@ -477,31 +477,31 @@ def main():
         for sid in tqdm(val_s1_ids, desc='Extracting validation features'):
             val_results.append(process_val_sid(sid))
     
-    retrieved_val_true = 0
-    val_pair_list = []
-    cross_pairs_val = []
-    for rv_true, rv_pairs, rc in val_results:
-        retrieved_val_true += rv_true
-        val_pair_list.extend(rv_pairs)
-        cross_pairs_val.extend(rc)
-        
-    print('Scoring Validation Pairs with Cross-Encoder (with Caching)...')
-    val_scores_path = os.path.join(cache_dir, 'val_cross_scores.npy')
-    if os.path.exists(val_scores_path):
-        val_cross_scores = np.load(val_scores_path)
-        if 'cross_pairs_val' not in locals() or len(val_cross_scores) == len(cross_pairs_val):
-            print(' -> Found cached validation cross-encoder scores!')
+        retrieved_val_true = 0
+        val_pair_list = []
+        cross_pairs_val = []
+        for rv_true, rv_pairs, rc in val_results:
+            retrieved_val_true += rv_true
+            val_pair_list.extend(rv_pairs)
+            cross_pairs_val.extend(rc)
+            
+        print('Scoring Validation Pairs with Cross-Encoder (with Caching)...')
+        val_scores_path = os.path.join(cache_dir, 'val_cross_scores.npy')
+        if os.path.exists(val_scores_path):
+            val_cross_scores = np.load(val_scores_path)
+            if 'cross_pairs_val' not in locals() or len(val_cross_scores) == len(cross_pairs_val):
+                print(' -> Found cached validation cross-encoder scores!')
+            else:
+                print(' -> Cache size mismatch! Re-running validation cross-encoder...')
+                val_cross_scores = cross_encoder.predict(cross_pairs_val, batch_size=512, show_progress_bar=True)
+                np.save(val_scores_path, val_cross_scores)
         else:
-            print(' -> Cache size mismatch! Re-running validation cross-encoder...')
             val_cross_scores = cross_encoder.predict(cross_pairs_val, batch_size=512, show_progress_bar=True)
             np.save(val_scores_path, val_cross_scores)
-    else:
-        val_cross_scores = cross_encoder.predict(cross_pairs_val, batch_size=512, show_progress_bar=True)
-        np.save(val_scores_path, val_cross_scores)
-    
-    for i in range(len(val_pair_list)):
-        prob = 1.0 / (1.0 + math.exp(-val_cross_scores[i]))
-        val_pair_list[i][2][-4] = float(prob)
+        
+        for i in range(len(val_pair_list)):
+            prob = 1.0 / (1.0 + math.exp(-val_cross_scores[i]))
+            val_pair_list[i][2][-4] = float(prob)
 
         X_val = np.array([p[2] for p in val_pair_list], dtype=np.float32)
         
