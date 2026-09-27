@@ -49,6 +49,7 @@ FEATURE_NAMES = [
     'zip_code_match',
     'name_tfidf_sim',
     'name_semantic_sim',
+    'addr_semantic_sim',
     'is_addr_missing',
     'is_name_missing',
     'is_pnum_missing'
@@ -61,7 +62,7 @@ def char_ngrams(s, n=3):
     return {s[i:i+n] for i in range(len(s) - n + 1)}
 
 
-def extract_features_for_pair(s1_tuple, target_tuple, target_id, shared_keys=1, tfidf_sim=0.0, semantic_sim=0.0):
+def extract_features_for_pair(s1_tuple, target_tuple, target_id, shared_keys=1, tfidf_sim=0.0, semantic_sim=0.0, addr_semantic_sim=0.0):
     """
     s1_tuple: (clean_name, core_name, clean_addr, nums_set, primary_num)
     target_tuple: (clean_name, core_name, clean_addr, nums_set, primary_num)
@@ -238,6 +239,7 @@ def extract_features_for_pair(s1_tuple, target_tuple, target_id, shared_keys=1, 
         zip_code_match,
         float(tfidf_sim),
         float(semantic_sim),
+        float(addr_semantic_sim),
         is_addr_missing,
         is_name_missing,
         is_pnum_missing

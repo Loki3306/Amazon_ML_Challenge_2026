@@ -215,15 +215,23 @@ def main():
     target_tfidf_mat = tfidf_vec.transform(target_names)
     
     print('Preparing Combined Strings for Dense Retrieval...')
+    s1_addrs = [s1_preprocessed[sid][2] for sid in s1_id_to_idx.keys()]
+    target_addrs = [target_preprocessed[tid][2] for tid in target_id_to_idx.keys()]
+    
     s1_combined = [f"{s1_preprocessed[sid][0]} {s1_preprocessed[sid][2]} {s1_preprocessed[sid][5]}" for sid in s1_id_to_idx.keys()]
     target_combined = [f"{target_preprocessed[tid][0]} {target_preprocessed[tid][2]} {target_preprocessed[tid][5]}" for tid in target_id_to_idx.keys()]
     
     print('Encoding Semantic Vectors (all-MiniLM-L6-v2) on GPU...')
     embed_model = SentenceTransformer('all-MiniLM-L6-v2', device='cuda')
-    print(' -> Encoding target entities...')
+    print(' -> Encoding target combined entities...')
     t_embeddings = embed_model.encode(target_combined, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
-    print(' -> Encoding S1 entities...')
+    print(' -> Encoding target addresses...')
+    t_addr_embeddings = embed_model.encode(target_addrs, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
+    
+    print(' -> Encoding S1 combined entities...')
     s1_embeddings = embed_model.encode(s1_combined, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
+    print(' -> Encoding S1 addresses...')
+    s1_addr_embeddings = embed_model.encode(s1_addrs, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
     
     print('Building FAISS Semantic Index...')
     d = t_embeddings.shape[1]
@@ -274,7 +282,8 @@ def main():
                 t_vec = target_tfidf_mat[t_idx]
                 tfidf_sim = float(s1_vec.multiply(t_vec).sum())
                 semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
-                feats = extract_features_for_pair(s1_tup, t_tup, mid, sh, tfidf_sim, semantic_sim)
+                addr_semantic_sim = float(np.dot(s1_addr_embeddings[sid_idx], t_addr_embeddings[t_idx]))
+                feats = extract_features_for_pair(s1_tup, t_tup, mid, sh, tfidf_sim, semantic_sim, addr_semantic_sim)
                 local_X.append(feats)
                 local_y.append(1)
 
@@ -286,7 +295,8 @@ def main():
                 t_vec = target_tfidf_mat[t_idx]
                 tfidf_sim = float(s1_vec.multiply(t_vec).sum())
                 semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
-                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim, semantic_sim)
+                addr_semantic_sim = float(np.dot(s1_addr_embeddings[sid_idx], t_addr_embeddings[t_idx]))
+                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim, semantic_sim, addr_semantic_sim)
                 local_X.append(feats)
                 local_y.append(0)
                 neg_count += 1
@@ -356,7 +366,8 @@ def main():
                 t_vec = target_tfidf_mat[t_idx]
                 tfidf_sim = float(s1_vec.multiply(t_vec).sum())
                 semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
-                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim, semantic_sim)
+                addr_semantic_sim = float(np.dot(s1_addr_embeddings[sid_idx], t_addr_embeddings[t_idx]))
+                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim, semantic_sim, addr_semantic_sim)
                 local_pairs.append((sid, tid, feats, s1_tup, t_tup))
         return local_retrieved_val_true, local_pairs
 
