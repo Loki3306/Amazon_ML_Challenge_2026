@@ -5,6 +5,8 @@ import json
 import argparse
 import collections
 import numpy as np
+import joblib
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 # Ensure scripts/akash is in python path
 src_dir = os.path.abspath(os.path.dirname(__file__))
@@ -194,6 +196,21 @@ def main():
         return []
 
     # 5. Build Training Feature Matrix with Active Hard Negative Mining
+    print('Fitting Global TF-IDF Vocabulary on Names...')
+    s1_id_to_idx = {sid: i for i, sid in enumerate(s1_preprocessed.keys())}
+    target_id_to_idx = {tid: i for i, tid in enumerate(target_preprocessed.keys())}
+    s1_names = [s1_preprocessed[sid][0] for sid in s1_id_to_idx.keys()]
+    target_names = [target_preprocessed[tid][0] for tid in target_id_to_idx.keys()]
+    
+    tfidf_vec = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4), max_df=0.8, min_df=2)
+    tfidf_vec.fit(s1_names + target_names)
+    os.makedirs('models', exist_ok=True)
+    joblib.dump(tfidf_vec, 'models/tfidf_name.pkl')
+    
+    print('Transforming TF-IDF matrices...')
+    s1_tfidf_mat = tfidf_vec.transform(s1_names)
+    target_tfidf_mat = tfidf_vec.transform(target_names)
+
     print('Extracting features for training pairs (including hard negatives)...')
     t_feat_start = time.time()
     X_train = []
@@ -206,11 +223,17 @@ def main():
         cand_mids = {tid: count for tid, count in cands}
 
         s1_tup = s1_preprocessed[sid][:5]
+        sid_idx = s1_id_to_idx[sid]
+        s1_vec = s1_tfidf_mat[sid_idx]
+
         for mid in true_mids:
             if mid in target_preprocessed:
                 t_tup = target_preprocessed[mid][:5]
                 sh = cand_mids.get(mid, 1)
-                feats = extract_features_for_pair(s1_tup, t_tup, mid, sh)
+                t_idx = target_id_to_idx[mid]
+                t_vec = target_tfidf_mat[t_idx]
+                tfidf_sim = float(s1_vec.multiply(t_vec).sum())
+                feats = extract_features_for_pair(s1_tup, t_tup, mid, sh, tfidf_sim)
                 X_train.append(feats)
                 y_train.append(1)
 
@@ -220,7 +243,10 @@ def main():
         for tid, sh in cands:
             if tid not in true_mids and tid in target_preprocessed:
                 t_tup = target_preprocessed[tid][:5]
-                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh)
+                t_idx = target_id_to_idx[tid]
+                t_vec = target_tfidf_mat[t_idx]
+                tfidf_sim = float(s1_vec.multiply(t_vec).sum())
+                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim)
                 X_train.append(feats)
                 y_train.append(0)
                 neg_count += 1
@@ -259,10 +285,16 @@ def main():
         retrieved_val_true += len(val_gt[sid] & set(cand_ids))
 
         s1_tup = s1_preprocessed[sid][:5]
+        sid_idx = s1_id_to_idx[sid]
+        s1_vec = s1_tfidf_mat[sid_idx]
+        
         for tid, sh in cands:
             if tid in target_preprocessed:
                 t_tup = target_preprocessed[tid][:5]
-                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh)
+                t_idx = target_id_to_idx[tid]
+                t_vec = target_tfidf_mat[t_idx]
+                tfidf_sim = float(s1_vec.multiply(t_vec).sum())
+                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim)
                 val_pair_list.append((sid, tid, feats, s1_tup, t_tup))
 
     X_val = np.array([p[2] for p in val_pair_list], dtype=np.float32)
