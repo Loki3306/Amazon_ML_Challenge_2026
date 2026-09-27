@@ -358,8 +358,13 @@ def main():
     print('Scoring Training Pairs with Cross-Encoder (with Caching)...')
     train_scores_path = os.path.join(cache_dir, 'train_cross_scores.npy')
     if os.path.exists(train_scores_path):
-        print(' -> Found cached train cross-encoder scores!')
         train_cross_scores = np.load(train_scores_path)
+        if len(train_cross_scores) == len(cross_pairs_train):
+            print(' -> Found cached train cross-encoder scores!')
+        else:
+            print(' -> Cache size mismatch! Re-running train cross-encoder...')
+            train_cross_scores = cross_encoder.predict(cross_pairs_train, batch_size=512, show_progress_bar=True)
+            np.save(train_scores_path, train_cross_scores)
     else:
         train_cross_scores = cross_encoder.predict(cross_pairs_train, batch_size=512, show_progress_bar=True)
         np.save(train_scores_path, train_cross_scores)
@@ -456,8 +461,13 @@ def main():
     print('Scoring Validation Pairs with Cross-Encoder (with Caching)...')
     val_scores_path = os.path.join(cache_dir, 'val_cross_scores.npy')
     if os.path.exists(val_scores_path):
-        print(' -> Found cached validation cross-encoder scores!')
         val_cross_scores = np.load(val_scores_path)
+        if len(val_cross_scores) == len(cross_pairs_val):
+            print(' -> Found cached validation cross-encoder scores!')
+        else:
+            print(' -> Cache size mismatch! Re-running validation cross-encoder...')
+            val_cross_scores = cross_encoder.predict(cross_pairs_val, batch_size=512, show_progress_bar=True)
+            np.save(val_scores_path, val_cross_scores)
     else:
         val_cross_scores = cross_encoder.predict(cross_pairs_val, batch_size=512, show_progress_bar=True)
         np.save(val_scores_path, val_cross_scores)
