@@ -6,7 +6,9 @@ import argparse
 import collections
 import numpy as np
 import joblib
+import faiss
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sentence_transformers import SentenceTransformer
 
 # Ensure scripts/akash is in python path
 src_dir = os.path.abspath(os.path.dirname(__file__))
@@ -210,6 +212,32 @@ def main():
     print('Transforming TF-IDF matrices...')
     s1_tfidf_mat = tfidf_vec.transform(s1_names)
     target_tfidf_mat = tfidf_vec.transform(target_names)
+    
+    print('Encoding Semantic Vectors (all-MiniLM-L6-v2)...')
+    # Use CPU by default, it takes ~2 mins for 600k strings on Kaggle
+    embed_model = SentenceTransformer('all-MiniLM-L6-v2')
+    print(' -> Encoding target names...')
+    t_embeddings = embed_model.encode(target_names, batch_size=256, show_progress_bar=True, normalize_embeddings=True)
+    print(' -> Encoding S1 names...')
+    s1_embeddings = embed_model.encode(s1_names, batch_size=256, show_progress_bar=True, normalize_embeddings=True)
+    
+    print('Building FAISS Semantic Index...')
+    d = t_embeddings.shape[1]
+    faiss_index = faiss.IndexFlatIP(d)
+    faiss_index.add(t_embeddings)
+    
+    print('Retrieving Semantic Candidates...')
+    top_k_faiss = 5
+    faiss_distances, faiss_indices = faiss_index.search(s1_embeddings, top_k_faiss)
+    
+    target_ids_list = list(target_id_to_idx.keys())
+    faiss_cands = collections.defaultdict(list)
+    for i, sid in enumerate(s1_id_to_idx.keys()):
+        for j in range(top_k_faiss):
+            tid = target_ids_list[faiss_indices[i][j]]
+            score = faiss_distances[i][j]
+            if score >= 0.70:  # Only keep somewhat confident semantic matches
+                faiss_cands[sid].append((tid, score))
 
     print('Extracting features for training pairs (including hard negatives)...')
     t_feat_start = time.time()
@@ -221,6 +249,12 @@ def main():
         true_mids = train_gt.get(sid, set()) & train_target_set
         cands = get_candidates(sid, top_k=20)
         cand_mids = {tid: count for tid, count in cands}
+        
+        # Inject Semantic Candidates
+        for tid, score in faiss_cands[sid]:
+            if tid not in cand_mids:
+                cands.append((tid, 1)) # Add to candidates list with fake count 1
+                cand_mids[tid] = 1
 
         s1_tup = s1_preprocessed[sid][:5]
         sid_idx = s1_id_to_idx[sid]
@@ -233,7 +267,8 @@ def main():
                 t_idx = target_id_to_idx[mid]
                 t_vec = target_tfidf_mat[t_idx]
                 tfidf_sim = float(s1_vec.multiply(t_vec).sum())
-                feats = extract_features_for_pair(s1_tup, t_tup, mid, sh, tfidf_sim)
+                semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
+                feats = extract_features_for_pair(s1_tup, t_tup, mid, sh, tfidf_sim, semantic_sim)
                 X_train.append(feats)
                 y_train.append(1)
 
@@ -246,7 +281,8 @@ def main():
                 t_idx = target_id_to_idx[tid]
                 t_vec = target_tfidf_mat[t_idx]
                 tfidf_sim = float(s1_vec.multiply(t_vec).sum())
-                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim)
+                semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
+                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim, semantic_sim)
                 X_train.append(feats)
                 y_train.append(0)
                 neg_count += 1
@@ -282,6 +318,15 @@ def main():
     for sid in val_s1_ids:
         cands = get_candidates(sid, top_k=20)
         cand_ids = [tid for tid, _ in cands]
+        
+        # Inject Semantic Candidates for validation recall
+        cand_mids = set(cand_ids)
+        for tid, score in faiss_cands.get(sid, []):
+            if tid not in cand_mids:
+                cands.append((tid, 1))
+                cand_ids.append(tid)
+                cand_mids.add(tid)
+                
         retrieved_val_true += len(val_gt[sid] & set(cand_ids))
 
         s1_tup = s1_preprocessed[sid][:5]
@@ -294,7 +339,8 @@ def main():
                 t_idx = target_id_to_idx[tid]
                 t_vec = target_tfidf_mat[t_idx]
                 tfidf_sim = float(s1_vec.multiply(t_vec).sum())
-                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim)
+                semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
+                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim, semantic_sim)
                 val_pair_list.append((sid, tid, feats, s1_tup, t_tup))
 
     X_val = np.array([p[2] for p in val_pair_list], dtype=np.float32)
