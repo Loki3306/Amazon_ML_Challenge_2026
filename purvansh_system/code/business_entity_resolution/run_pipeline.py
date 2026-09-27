@@ -157,11 +157,12 @@ def main():
               flush=True)
         with open(model_checkpoint, "rb") as f:
             ckpt = pickle.load(f)
-            model     = ckpt["model"]
-            best_tau  = ckpt["best_tau"]
-            best_f05  = ckpt["best_f05"]
-            val_auc   = ckpt["val_auc"]
-        print(f"  Loaded: tau*={best_tau:.4f}, Val F_0.5={best_f05:.5f}",
+            model       = ckpt["model"]
+            best_tau_s2 = ckpt.get("best_tau_s2", 0.50)
+            best_tau_s3 = ckpt.get("best_tau_s3", 0.50)
+            best_f05    = ckpt["best_f05"]
+            val_auc     = ckpt["val_auc"]
+        print(f"  Loaded: tau_s2={best_tau_s2:.4f}, tau_s3={best_tau_s3:.4f}, Val F_0.5={best_f05:.5f}",
               flush=True)
     else:
         print(f"\n[Stage 1] Building Training Pairs & Training LightGBM...",
@@ -304,7 +305,7 @@ def main():
               f"(Pos={int(y_arr.sum()):,}, Neg={int((1-y_arr).sum()):,}) | "
               f"RAM: {get_ram_usage()}", flush=True)
 
-        model, best_tau, best_f05, val_auc = train_lightgbm_model(
+        model, best_tau_s2, best_tau_s3, best_f05, val_auc = train_lightgbm_model(
             X_arr, y_arr, group_arr, pair_meta, gt_map, random_state=42
         )
 
@@ -312,7 +313,8 @@ def main():
         with open(model_checkpoint, "wb") as f:
             pickle.dump({
                 "model": model,
-                "best_tau": best_tau,
+                "best_tau_s2": best_tau_s2,
+                "best_tau_s3": best_tau_s3,
                 "best_f05": best_f05,
                 "val_auc": val_auc,
             }, f)
@@ -460,7 +462,8 @@ def main():
 
     final_matches = apply_graph_postprocessing(
         pair_records,
-        tau_match=best_tau,
+        tau_match_s2=best_tau_s2,
+        tau_match_s3=best_tau_s3,
         tau_singleton=0.30,
         max_matches=11,
     )

@@ -9,7 +9,8 @@ import numpy as np
 
 def apply_graph_postprocessing(
     pair_records: list,
-    tau_match: float,
+    tau_match_s2: float,
+    tau_match_s3: float,
     tau_singleton: float = 0.30,
     max_matches: int = 11
 ) -> dict:
@@ -21,7 +22,8 @@ def apply_graph_postprocessing(
     
     Args:
         pair_records: list of ((s1_id, cand_id), probability)
-        tau_match: Optimal decision threshold from validation tuning
+        tau_match_s2: Optimal decision threshold for Source 2
+        tau_match_s3: Optimal decision threshold for Source 3
         tau_singleton: Confidence threshold below which entity is treated as singleton
         max_matches: Maximum allowed matches per entity (11 per dataset specification)
         
@@ -42,7 +44,9 @@ def apply_graph_postprocessing(
     for (sid, cid), prob in pair_records:
         pair_prob_lookup[(sid, cid)] = prob
         s1_max_prob[sid] = max(s1_max_prob[sid], prob)
-        if prob >= tau_match and cid not in assigned_cand:
+        
+        t_match = tau_match_s2 if cid.startswith('S2-') else tau_match_s3
+        if prob >= t_match and cid not in assigned_cand:
             final_matches[sid].add(cid)
             assigned_cand.add(cid)
             

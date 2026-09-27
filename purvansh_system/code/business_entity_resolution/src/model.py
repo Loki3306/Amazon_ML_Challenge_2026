@@ -110,17 +110,20 @@ def train_lightgbm_model(
     print(f"Validation AUC-ROC: {val_auc:.5f} (trained in {time.time() - t0:.1f}s)")
     
     # Fine-grained grid search for optimal Macro F_0.5 decision threshold
-    print("Optimizing decision threshold tau* on validation set...")
-    best_tau, best_f05 = 0.50, 0.0
-    for tau in np.linspace(0.35, 0.85, 51):
-        pred_dict = defaultdict(set)
-        for (sid, cid), prob in zip(val_pairs, val_probs):
-            if prob >= tau:
-                pred_dict[sid].add(cid)
-        score = evaluate_macro_f05(val_gt, pred_dict)
-        if score > best_f05:
-            best_f05 = score
-            best_tau = float(tau)
-            
-    print(f"Optimal Threshold tau*: {best_tau:.4f} | Validation Macro F_0.5: {best_f05:.5f}")
-    return model, best_tau, best_f05, val_auc
+    print("Optimizing decision threshold (tau_s2, tau_s3) on validation set...")
+    best_tau_s2, best_tau_s3, best_f05 = 0.50, 0.50, 0.0
+    for tau2 in np.linspace(0.35, 0.85, 26):
+        for tau3 in np.linspace(0.35, 0.85, 26):
+            pred_dict = defaultdict(set)
+            for (sid, cid), prob in zip(val_pairs, val_probs):
+                t = tau2 if cid.startswith('S2-') else tau3
+                if prob >= t:
+                    pred_dict[sid].add(cid)
+            score = evaluate_macro_f05(val_gt, pred_dict)
+            if score > best_f05:
+                best_f05 = score
+                best_tau_s2 = float(tau2)
+                best_tau_s3 = float(tau3)
+                
+    print(f"Optimal Thresholds S2: {best_tau_s2:.4f}, S3: {best_tau_s3:.4f} | Validation Macro F_0.5: {best_f05:.5f}")
+    return model, best_tau_s2, best_tau_s3, val_auc
