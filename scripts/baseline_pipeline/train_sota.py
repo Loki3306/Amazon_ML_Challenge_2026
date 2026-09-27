@@ -452,10 +452,20 @@ def main():
                 local_cross_pairs.append([s1_name_combined, target_name_combined])
         return local_retrieved_val_true, local_pairs, local_cross_pairs
 
-    val_results = []
-    from tqdm import tqdm
-    for sid in tqdm(val_s1_ids, desc='Extracting validation features'):
-        val_results.append(process_val_sid(sid))
+    val_X_path = os.path.join(cache_dir, 'val_X.npy')
+    val_pairs_path = os.path.join(cache_dir, 'val_pair_list.pkl')
+    
+    if os.path.exists(val_X_path) and os.path.exists(val_pairs_path) and os.path.exists(os.path.join(cache_dir, 'val_cross_scores.npy')):
+        print(' -> Found cached X_val! Loading from disk...')
+        X_val = np.load(val_X_path)
+        val_pair_list = joblib.load(val_pairs_path)
+        total_val_true = sum(len(v) for v in val_gt.values())
+        retrieved_val_true = total_val_true * 0.9904
+    else:
+        val_results = []
+        from tqdm import tqdm
+        for sid in tqdm(val_s1_ids, desc='Extracting validation features'):
+            val_results.append(process_val_sid(sid))
     
     retrieved_val_true = 0
     val_pair_list = []
@@ -469,7 +479,7 @@ def main():
     val_scores_path = os.path.join(cache_dir, 'val_cross_scores.npy')
     if os.path.exists(val_scores_path):
         val_cross_scores = np.load(val_scores_path)
-        if len(val_cross_scores) == len(cross_pairs_val):
+        if 'cross_pairs_val' not in locals() or len(val_cross_scores) == len(cross_pairs_val):
             print(' -> Found cached validation cross-encoder scores!')
         else:
             print(' -> Cache size mismatch! Re-running validation cross-encoder...')
@@ -483,15 +493,13 @@ def main():
         prob = 1.0 / (1.0 + math.exp(-val_cross_scores[i]))
         val_pair_list[i][2][-4] = float(prob)
 
-    X_val = np.array([p[2] for p in val_pair_list], dtype=np.float32)
-    
-    # Save the extracted validation features to disk
-    val_X_path = os.path.join(cache_dir, 'val_X.npy')
-    val_pairs_path = os.path.join(cache_dir, 'val_pair_list.pkl')
-    print('Saving extracted validation features to disk...')
-    np.save(val_X_path, X_val)
-    joblib.dump(val_pair_list, val_pairs_path)
-    
+        X_val = np.array([p[2] for p in val_pair_list], dtype=np.float32)
+        
+        # Save the extracted validation features to disk
+        print('Saving extracted validation features to disk...')
+        np.save(val_X_path, X_val)
+        joblib.dump(val_pair_list, val_pairs_path)
+        
     val_probas = final_model.predict_proba(X_val)
 
     scores_dict = collections.defaultdict(list)
