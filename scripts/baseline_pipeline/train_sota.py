@@ -239,20 +239,21 @@ def main():
         s1_addr_embeddings = np.load(s1_addr_emb_path)
     else:
         embed_model = SentenceTransformer('all-MiniLM-L6-v2', device='cuda')
+        embed_model.half() # Boost speed 2x with FP16 Tensor Cores
         print(' -> Encoding target combined entities...')
-        t_embeddings = embed_model.encode(target_combined, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
+        t_embeddings = embed_model.encode(target_combined, batch_size=1024, show_progress_bar=True, normalize_embeddings=True)
         np.save(t_emb_path, t_embeddings)
         
         print(' -> Encoding target addresses...')
-        t_addr_embeddings = embed_model.encode(target_addrs, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
+        t_addr_embeddings = embed_model.encode(target_addrs, batch_size=1024, show_progress_bar=True, normalize_embeddings=True)
         np.save(t_addr_emb_path, t_addr_embeddings)
         
         print(' -> Encoding S1 combined entities...')
-        s1_embeddings = embed_model.encode(s1_combined, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
+        s1_embeddings = embed_model.encode(s1_combined, batch_size=1024, show_progress_bar=True, normalize_embeddings=True)
         np.save(s1_emb_path, s1_embeddings)
         
         print(' -> Encoding S1 addresses...')
-        s1_addr_embeddings = embed_model.encode(s1_addrs, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
+        s1_addr_embeddings = embed_model.encode(s1_addrs, batch_size=1024, show_progress_bar=True, normalize_embeddings=True)
         np.save(s1_addr_emb_path, s1_addr_embeddings)
     
     print('Building FAISS Semantic Index...')
@@ -266,6 +267,7 @@ def main():
     
     print('Loading Cross-Encoder for SOTA Rescoring...')
     cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2', device='cuda')
+    cross_encoder.model.half() # Boost speed 2x with FP16 Tensor Cores
     
     target_ids_list = list(target_id_to_idx.keys())
     faiss_cands = collections.defaultdict(list)
@@ -349,7 +351,7 @@ def main():
         print(' -> Found cached train cross-encoder scores!')
         train_cross_scores = np.load(train_scores_path)
     else:
-        train_cross_scores = cross_encoder.predict(cross_pairs_train, batch_size=256, show_progress_bar=True)
+        train_cross_scores = cross_encoder.predict(cross_pairs_train, batch_size=512, show_progress_bar=True)
         np.save(train_scores_path, train_cross_scores)
     
     # Inject cross scores into X_train (it's the 4th feature from the end, index -4)
@@ -441,7 +443,7 @@ def main():
         print(' -> Found cached validation cross-encoder scores!')
         val_cross_scores = np.load(val_scores_path)
     else:
-        val_cross_scores = cross_encoder.predict(cross_pairs_val, batch_size=256, show_progress_bar=True)
+        val_cross_scores = cross_encoder.predict(cross_pairs_val, batch_size=512, show_progress_bar=True)
         np.save(val_scores_path, val_cross_scores)
     
     for i in range(len(val_pair_list)):
