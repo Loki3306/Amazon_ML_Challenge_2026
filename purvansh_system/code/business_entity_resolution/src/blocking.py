@@ -232,7 +232,7 @@ def shard_streaming_tfidf_blocking(
         # scipy handles the transpose efficiently
         if USE_GPU:
             shard_matrix_gpu = cpx_sparse.csr_matrix(shard_matrix)
-            shard_matrix_gpu_t = shard_matrix_gpu.T
+            shard_matrix_gpu_t = shard_matrix_gpu.T.tocsr()
             
         for bs in range(0, n_s1, s1_batch_size):
             be = min(bs + s1_batch_size, n_s1)
