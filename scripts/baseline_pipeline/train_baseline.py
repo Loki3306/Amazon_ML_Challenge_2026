@@ -214,13 +214,16 @@ def main():
     s1_tfidf_mat = tfidf_vec.transform(s1_names)
     target_tfidf_mat = tfidf_vec.transform(target_names)
     
-    print('Encoding Semantic Vectors (all-MiniLM-L6-v2)...')
-    # Use CPU by default, it takes ~2 mins for 600k strings on Kaggle
-    embed_model = SentenceTransformer('all-MiniLM-L6-v2')
-    print(' -> Encoding target names...')
-    t_embeddings = embed_model.encode(target_names, batch_size=256, show_progress_bar=True, normalize_embeddings=True)
-    print(' -> Encoding S1 names...')
-    s1_embeddings = embed_model.encode(s1_names, batch_size=256, show_progress_bar=True, normalize_embeddings=True)
+    print('Preparing Combined Strings for Dense Retrieval...')
+    s1_combined = [f"{s1_preprocessed[sid][0]} {s1_preprocessed[sid][2]} {s1_preprocessed[sid][5]}" for sid in s1_id_to_idx.keys()]
+    target_combined = [f"{target_preprocessed[tid][0]} {target_preprocessed[tid][2]} {target_preprocessed[tid][5]}" for tid in target_id_to_idx.keys()]
+    
+    print('Encoding Semantic Vectors (all-mpnet-base-v2)...')
+    embed_model = SentenceTransformer('all-mpnet-base-v2')
+    print(' -> Encoding target entities...')
+    t_embeddings = embed_model.encode(target_combined, batch_size=256, show_progress_bar=True, normalize_embeddings=True)
+    print(' -> Encoding S1 entities...')
+    s1_embeddings = embed_model.encode(s1_combined, batch_size=256, show_progress_bar=True, normalize_embeddings=True)
     
     print('Building FAISS Semantic Index...')
     d = t_embeddings.shape[1]
