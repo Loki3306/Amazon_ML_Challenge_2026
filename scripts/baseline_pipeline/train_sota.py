@@ -340,7 +340,7 @@ def main():
                 local_y.append(0)
                 local_cross_pairs.append([s1_combined[sid_idx], target_combined[t_idx]])
                 neg_count += 1
-                if neg_count >= max(3, len(true_mids) * 3):
+                if neg_count >= max(20, len(true_mids) * 5):
                     break
         return local_X, local_y, local_cross_pairs
 
@@ -498,6 +498,7 @@ def main():
     opt_preds = apply_threshold_and_deduplication(scores_dict, best_s2, best_s3)
     final_metrics = evaluate_predictions(val_gt, opt_preds)
     val_cand_recall = retrieved_val_true / total_val_true if total_val_true > 0 else 0.0
+    conditional_recall = final_metrics['global_recall'] / val_cand_recall if val_cand_recall > 0 else 0.0
 
     print('\n' + '=' * 60)
     print('FINAL MODEL VALIDATION BENCHMARKS')
@@ -508,6 +509,7 @@ def main():
     print(f"Validation Recall     : {final_metrics['global_recall']:.6f}")
     print(f"Validation Macro F1   : {final_metrics['macro_f1']:.6f}")
     print(f"Candidate Recall      : {val_cand_recall:.6f}")
+    print(f"Cond. Model Recall    : {conditional_recall:.6f} (Recall on matches the model actually saw)")
     print(f"False Positives       : {final_metrics['total_fp']}")
     print(f"False Negatives       : {final_metrics['total_fn']}")
     print(f"Singleton Accuracy    : {final_metrics['singleton_accuracy']:.6f}")
