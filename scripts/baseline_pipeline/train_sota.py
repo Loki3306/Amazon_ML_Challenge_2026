@@ -222,17 +222,38 @@ def main():
     s1_combined = [f"{s1_preprocessed[sid][0]} {s1_preprocessed[sid][2]} {s1_preprocessed[sid][5]}" for sid in s1_id_to_idx.keys()]
     target_combined = [f"{target_preprocessed[tid][0]} {target_preprocessed[tid][2]} {target_preprocessed[tid][5]}" for tid in target_id_to_idx.keys()]
     
-    print('Encoding Semantic Vectors (all-MiniLM-L6-v2) on GPU...')
-    embed_model = SentenceTransformer('all-MiniLM-L6-v2', device='cuda')
-    print(' -> Encoding target combined entities...')
-    t_embeddings = embed_model.encode(target_combined, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
-    print(' -> Encoding target addresses...')
-    t_addr_embeddings = embed_model.encode(target_addrs, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
+    print('Encoding Semantic Vectors (all-MiniLM-L6-v2) on GPU (with Caching)...')
+    cache_dir = os.path.join(args.model_dir, 'cache')
+    os.makedirs(cache_dir, exist_ok=True)
     
-    print(' -> Encoding S1 combined entities...')
-    s1_embeddings = embed_model.encode(s1_combined, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
-    print(' -> Encoding S1 addresses...')
-    s1_addr_embeddings = embed_model.encode(s1_addrs, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
+    t_emb_path = os.path.join(cache_dir, 't_embeddings.npy')
+    t_addr_emb_path = os.path.join(cache_dir, 't_addr_embeddings.npy')
+    s1_emb_path = os.path.join(cache_dir, 's1_embeddings.npy')
+    s1_addr_emb_path = os.path.join(cache_dir, 's1_addr_embeddings.npy')
+    
+    if os.path.exists(t_emb_path) and os.path.exists(t_addr_emb_path) and os.path.exists(s1_emb_path) and os.path.exists(s1_addr_emb_path):
+        print(' -> Found cached embeddings! Loading from disk...')
+        t_embeddings = np.load(t_emb_path)
+        t_addr_embeddings = np.load(t_addr_emb_path)
+        s1_embeddings = np.load(s1_emb_path)
+        s1_addr_embeddings = np.load(s1_addr_emb_path)
+    else:
+        embed_model = SentenceTransformer('all-MiniLM-L6-v2', device='cuda')
+        print(' -> Encoding target combined entities...')
+        t_embeddings = embed_model.encode(target_combined, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
+        np.save(t_emb_path, t_embeddings)
+        
+        print(' -> Encoding target addresses...')
+        t_addr_embeddings = embed_model.encode(target_addrs, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
+        np.save(t_addr_emb_path, t_addr_embeddings)
+        
+        print(' -> Encoding S1 combined entities...')
+        s1_embeddings = embed_model.encode(s1_combined, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
+        np.save(s1_emb_path, s1_embeddings)
+        
+        print(' -> Encoding S1 addresses...')
+        s1_addr_embeddings = embed_model.encode(s1_addrs, batch_size=512, show_progress_bar=True, normalize_embeddings=True)
+        np.save(s1_addr_emb_path, s1_addr_embeddings)
     
     print('Building FAISS Semantic Index...')
     d = t_embeddings.shape[1]
@@ -322,8 +343,14 @@ def main():
         y_train.extend(ry)
         cross_pairs_train.extend(rc)
 
-    print('Scoring Training Pairs with Cross-Encoder...')
-    train_cross_scores = cross_encoder.predict(cross_pairs_train, batch_size=256, show_progress_bar=True)
+    print('Scoring Training Pairs with Cross-Encoder (with Caching)...')
+    train_scores_path = os.path.join(cache_dir, 'train_cross_scores.npy')
+    if os.path.exists(train_scores_path):
+        print(' -> Found cached train cross-encoder scores!')
+        train_cross_scores = np.load(train_scores_path)
+    else:
+        train_cross_scores = cross_encoder.predict(cross_pairs_train, batch_size=256, show_progress_bar=True)
+        np.save(train_scores_path, train_cross_scores)
     
     # Inject cross scores into X_train (it's the 4th feature from the end, index -4)
     # feats structure: ..., tfidf, semantic, addr_semantic, cross_score, missing_flags...
@@ -408,8 +435,14 @@ def main():
         val_pair_list.extend(rv_pairs)
         cross_pairs_val.extend(rc)
         
-    print('Scoring Validation Pairs with Cross-Encoder...')
-    val_cross_scores = cross_encoder.predict(cross_pairs_val, batch_size=256, show_progress_bar=True)
+    print('Scoring Validation Pairs with Cross-Encoder (with Caching)...')
+    val_scores_path = os.path.join(cache_dir, 'val_cross_scores.npy')
+    if os.path.exists(val_scores_path):
+        print(' -> Found cached validation cross-encoder scores!')
+        val_cross_scores = np.load(val_scores_path)
+    else:
+        val_cross_scores = cross_encoder.predict(cross_pairs_val, batch_size=256, show_progress_bar=True)
+        np.save(val_scores_path, val_cross_scores)
     
     for i in range(len(val_pair_list)):
         prob = 1.0 / (1.0 + math.exp(-val_cross_scores[i]))
