@@ -1,4 +1,5 @@
 import collections
+import jellyfish
 import normalization as norm
 
 COMMON_ADDR_WORDS = {
@@ -46,10 +47,23 @@ def get_blocking_keys_from_preprocessed(c_n, core_n, c_a, nums):
     elif len(n_tokens) == 1 and len(n_tokens[0]) >= 3:
         keys.add(('n1', n_tokens[0]))
 
-    # 4. Individual significant name tokens
+    # 4. Individual significant name tokens & Acronyms
+    acronym_chars = []
     for t in n_tokens:
-        if len(t) >= 4 and t not in norm.LEGAL_SUFFIXES and t not in norm.ARTICLES_AND_PREP:
-            keys.add(('n_tok', t))
+        if t not in norm.LEGAL_SUFFIXES and t not in norm.ARTICLES_AND_PREP:
+            acronym_chars.append(t[0])
+            if len(t) >= 4:
+                keys.add(('n_tok', t))
+                phon_hash = jellyfish.metaphone(t)
+                if phon_hash:
+                    keys.add(('phonetic_n', phon_hash))
+                    
+    acronym = ''.join(acronym_chars)
+    if 2 <= len(acronym) <= 6:
+        keys.add(('acronym', acronym))
+        
+    if 2 <= len(compact_name) <= 6:
+        keys.add(('acronym', compact_name))
 
     # Address tokens: extract significant words
     sig_addr_words = [t for t in a_tokens if t not in COMMON_ADDR_WORDS and len(t) >= 3 and not t.isdigit()]
