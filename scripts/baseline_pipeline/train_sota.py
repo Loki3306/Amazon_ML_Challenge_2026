@@ -488,15 +488,26 @@ def main():
         if sid not in scores_dict:
             scores_dict[sid] = []
 
-    print('Applying Per-S1 Expected F0.5 Thresholding with 1-to-1 deduplication...')
-    opt_preds = apply_expected_f05_thresholding(scores_dict)
-    
+    # Grid search optimal thresholds with bipartite 1-to-1 consistency
+    print('Optimizing source-specific thresholds with 1-to-1 deduplication...')
+    best_f05 = -1.0
+    best_s2 = 0.50
+    best_s3 = 0.50
+    best_metrics = None
+
+    for t2 in np.linspace(0.40, 0.99, 15):
+        for t3 in np.linspace(0.40, 0.99, 15):
+            preds = apply_threshold_and_deduplication(scores_dict, t2, t3)
+            metrics = evaluate_predictions(val_gt, preds)
+            if metrics['macro_f05'] > best_f05:
+                best_f05 = metrics['macro_f05']
+                best_s2 = t2
+                best_s3 = t3
+                best_metrics = metrics
+
+    opt_preds = apply_threshold_and_deduplication(scores_dict, best_s2, best_s3)
     final_metrics = evaluate_predictions(val_gt, opt_preds)
     val_cand_recall = retrieved_val_true / total_val_true if total_val_true > 0 else 0.0
-    
-    # We no longer have a global best_s2 and best_s3
-    best_s2 = -1.0
-    best_s3 = -1.0
     conditional_recall = final_metrics['global_recall'] / val_cand_recall if val_cand_recall > 0 else 0.0
 
     print('\n' + '=' * 60)
