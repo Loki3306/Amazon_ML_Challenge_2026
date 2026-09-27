@@ -262,7 +262,7 @@ def main():
     faiss_index.add(t_embeddings)
     
     print('Retrieving Semantic Candidates (Extreme Recall)...')
-    top_k_faiss = 150
+    top_k_faiss = 350
     faiss_distances, faiss_indices = faiss_index.search(s1_embeddings, top_k_faiss)
     
     print('Loading Cross-Encoder for SOTA Rescoring...')
@@ -278,25 +278,35 @@ def main():
             if score >= 0.20:  # Dropped threshold to 0.20 for 99.5% Candidate Recall
                 faiss_cands[sid].append((tid, score))
 
-    print('Extracting features for training pairs (including hard negatives)...')
-    t_feat_start = time.time()
-    train_target_set = set(target_preprocessed.keys())
-    X_train = []
-    y_train = []
-
-    def process_train_sid(sid):
-        local_X = []
-        local_y = []
-        local_cross_pairs = []
-        true_mids = train_gt.get(sid, set()) & train_target_set
-        cands = get_candidates(sid, top_k=20)
-        cand_mids = {tid: count for tid, count in cands}
-        
-        # Inject Semantic Candidates
-        for tid, score in faiss_cands.get(sid, []):
-            if tid not in cand_mids:
-                cands.append((tid, 1))
-                cand_mids[tid] = 1
+    train_X_path = os.path.join(cache_dir, 'X_train.npy')
+    train_y_path = os.path.join(cache_dir, 'y_train.npy')
+    train_cross_pairs_path = os.path.join(cache_dir, 'cross_pairs_train.pkl')
+    
+    if os.path.exists(train_X_path) and os.path.exists(train_y_path) and os.path.exists(train_cross_pairs_path):
+        print(' -> Found cached X_train! Loading from disk...')
+        X_train = np.load(train_X_path)
+        y_train = np.load(train_y_path)
+        cross_pairs_train = joblib.load(train_cross_pairs_path)
+    else:
+        print('Extracting features for training pairs (including hard negatives)...')
+        t_feat_start = time.time()
+        train_target_set = set(target_preprocessed.keys())
+        X_train = []
+        y_train = []
+    
+        def process_train_sid(sid):
+            local_X = []
+            local_y = []
+            local_cross_pairs = []
+            true_mids = train_gt.get(sid, set()) & train_target_set
+            cands = get_candidates(sid, top_k=250)
+            cand_mids = {tid: count for tid, count in cands}
+            
+            # Inject Semantic Candidates
+            for tid, score in faiss_cands.get(sid, []):
+                if tid not in cand_mids:
+                    cands.append((tid, 1))
+                    cand_mids[tid] = 1
 
         s1_tup = s1_preprocessed[sid][:5]
         sid_idx = s1_id_to_idx[sid]
@@ -396,7 +406,7 @@ def main():
         local_pairs = []
         local_cross_pairs = []
         local_retrieved_val_true = 0
-        cands = get_candidates(sid, top_k=20)
+        cands = get_candidates(sid, top_k=250)
         cand_ids = [tid for tid, _ in cands]
         
         # Inject Semantic Candidates for validation recall
