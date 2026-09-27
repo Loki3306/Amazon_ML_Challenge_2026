@@ -184,7 +184,7 @@ def main():
         for k in list(indices[c].keys()):
             limit = 350 if (k[0].startswith('n') or k[0].startswith('core') or k[0].startswith('compact')) else 150
             if len(indices[c][k]) > limit:
-                del indices[c][k]
+                indices[c][k] = indices[c][k][:limit]
 
     def get_candidates(sid, top_k=20):
         s_keys = s1_blocking_keys[sid]
@@ -223,13 +223,27 @@ def main():
     target_combined = [f"{target_preprocessed[tid][0]} {target_preprocessed[tid][2]} {target_preprocessed[tid][5]}" for tid in target_id_to_idx.keys()]
     
     print('Encoding Semantic Vectors (all-MiniLM-L6-v2) on GPU (with Caching)...')
-    cache_dir = os.path.join(os.path.dirname(args.model_out), 'cache')
+    import hashlib
+    
+    CACHE_CONFIG = {
+        "faiss_k": 350,
+        "faiss_min_score": 0.20,
+        "bm25_k": 250,
+        "n_distractors": args.n_distractors,
+        "n_val": args.n_val,
+        "n_train": args.n_train,
+    }
+    cache_key = hashlib.md5(json.dumps(CACHE_CONFIG, sort_keys=True).encode()).hexdigest()[:10]
+    
+    emb_cache_dir = os.path.join(os.path.dirname(args.model_out) or '.', 'cache')
+    cache_dir = os.path.join(os.path.dirname(args.model_out) or '.', 'cache')
+    os.makedirs(emb_cache_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
     
-    t_emb_path = os.path.join(cache_dir, 't_embeddings.npy')
-    t_addr_emb_path = os.path.join(cache_dir, 't_addr_embeddings.npy')
-    s1_emb_path = os.path.join(cache_dir, 's1_embeddings.npy')
-    s1_addr_emb_path = os.path.join(cache_dir, 's1_addr_embeddings.npy')
+    t_emb_path = os.path.join(emb_cache_dir, 't_embeddings.npy')
+    t_addr_emb_path = os.path.join(emb_cache_dir, 't_addr_embeddings.npy')
+    s1_emb_path = os.path.join(emb_cache_dir, 's1_embeddings.npy')
+    s1_addr_emb_path = os.path.join(emb_cache_dir, 's1_addr_embeddings.npy')
     
     if os.path.exists(t_emb_path) and os.path.exists(t_addr_emb_path) and os.path.exists(s1_emb_path) and os.path.exists(s1_addr_emb_path):
         print(' -> Found cached embeddings! Loading from disk...')
@@ -306,8 +320,8 @@ def main():
             # Inject Semantic Candidates
             for tid, score in faiss_cands.get(sid, []):
                 if tid not in cand_mids:
-                    cands.append((tid, 1))
-                    cand_mids[tid] = 1
+                    cands.append((tid, 0)) # Separate from blocking votes
+                    cand_mids[tid] = 0
 
             s1_tup = s1_preprocessed[sid][:5]
             sid_idx = s1_id_to_idx[sid]
@@ -316,7 +330,7 @@ def main():
             for mid in true_mids:
                 if mid in target_preprocessed:
                     t_tup = target_preprocessed[mid][:5]
-                    sh = cand_mids.get(mid, 1)
+                    sh = cand_mids.get(mid, 0) # 0 to avoid false injection features
                     t_idx = target_id_to_idx[mid]
                     t_vec = target_tfidf_mat[t_idx]
                     tfidf_sim = float(s1_vec.multiply(t_vec).sum())
@@ -435,7 +449,7 @@ def main():
         cand_mids = set(cand_ids)
         for tid, score in faiss_cands.get(sid, []):
             if tid not in cand_mids:
-                cands.append((tid, 1))
+                cands.append((tid, 0))
                 cand_ids.append(tid)
                 cand_mids.add(tid)
                 
@@ -464,13 +478,17 @@ def main():
 
     val_X_path = os.path.join(cache_dir, 'val_X.npy')
     val_pairs_path = os.path.join(cache_dir, 'val_pair_list.pkl')
+    val_retrieved_true_path = os.path.join(cache_dir, 'val_retrieved_true.npy')
     
     if os.path.exists(val_X_path) and os.path.exists(val_pairs_path) and os.path.exists(os.path.join(cache_dir, 'val_cross_scores.npy')):
         print(' -> Found cached X_val! Loading from disk...')
         X_val = np.load(val_X_path)
         val_pair_list = joblib.load(val_pairs_path)
         total_val_true = sum(len(v) for v in val_gt.values())
-        retrieved_val_true = total_val_true * 0.9904
+        if os.path.exists(val_retrieved_true_path):
+            retrieved_val_true = int(np.load(val_retrieved_true_path)[0])
+        else:
+            retrieved_val_true = int(total_val_true * 0.9904) # Fallback for old cache
     else:
         val_results = []
         from tqdm import tqdm
@@ -509,6 +527,7 @@ def main():
         print('Saving extracted validation features to disk...')
         np.save(val_X_path, X_val)
         joblib.dump(val_pair_list, val_pairs_path)
+        np.save(val_retrieved_true_path, np.array([retrieved_val_true], dtype=np.int64))
         
     val_probas = final_model.predict_proba(X_val)
 
