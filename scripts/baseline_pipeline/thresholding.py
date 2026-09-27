@@ -88,6 +88,58 @@ def apply_threshold_and_deduplication(candidate_scores_dict, s2_threshold=0.5, s
     for p, s1_id, tid in all_pairs:
         if tid not in assigned_targets:
             assigned_targets.add(tid)
+    return result
+
+
+def apply_expected_f05_thresholding(candidate_scores_dict):
+    """
+    Applies per-S1 expected F0.5 thresholding instead of a global threshold.
+    For each S1 entity, chooses the top k candidates that maximize expected F0.5.
+    Then applies 1-to-1 deduplication for targets.
+    """
+    all_pairs = []
+    
+    for s1_id, scores in candidate_scores_dict.items():
+        if not scores:
+            continue
+            
+        # Sort candidates for this S1 by probability descending
+        sorted_scores = sorted(scores, key=lambda x: x[1], reverse=True)
+        
+        # Calculate expected total true matches E[T]
+        e_t = sum(p for _, p in sorted_scores)
+        
+        # Calculate P(T=0) for singleton prediction (k=0)
+        p_t_0 = 1.0
+        for _, p in sorted_scores:
+            p_t_0 *= (1.0 - p)
+            
+        best_k = 0
+        best_e_f05 = p_t_0
+        
+        e_tp = 0.0
+        for k in range(1, len(sorted_scores) + 1):
+            e_tp += sorted_scores[k-1][1]
+            e_f05_k = (1.25 * e_tp) / (0.25 * e_t + k)
+            
+            if e_f05_k > best_e_f05:
+                best_e_f05 = e_f05_k
+                best_k = k
+                
+        # Accept the top k candidates that maximized expected F0.5
+        for i in range(best_k):
+            tid, p = sorted_scores[i]
+            all_pairs.append((p, s1_id, tid))
+            
+    # Sort descending by score for target deduplication
+    all_pairs.sort(key=lambda x: x[0], reverse=True)
+
+    assigned_targets = set()
+    result = {s1_id: set() for s1_id in candidate_scores_dict.keys()}
+
+    for p, s1_id, tid in all_pairs:
+        if tid not in assigned_targets:
+            assigned_targets.add(tid)
             result[s1_id].add(tid)
 
     return result
