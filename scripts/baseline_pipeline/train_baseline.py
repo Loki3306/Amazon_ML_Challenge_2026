@@ -227,7 +227,7 @@ def main():
     faiss_index.add(t_embeddings)
     
     print('Retrieving Semantic Candidates...')
-    top_k_faiss = 5
+    top_k_faiss = 15
     faiss_distances, faiss_indices = faiss_index.search(s1_embeddings, top_k_faiss)
     
     target_ids_list = list(target_id_to_idx.keys())
@@ -300,9 +300,9 @@ def main():
     t_train_start = time.time()
     final_model = EntityMatcherModel(
         args.model_type,
-        n_estimators=args.n_estimators,
+        n_estimators=800,
         learning_rate=0.035,
-        max_depth=7,
+        max_depth=9,
         subsample=0.85,
         colsample_bytree=0.85
     )
@@ -349,13 +349,6 @@ def main():
     scores_dict = collections.defaultdict(list)
     for (sid, tid, feats, s1_tup, t_tup), p in zip(val_pair_list, val_probas):
         prob = float(p)
-        # Apply primary street number conflict penalty
-        s1_pnum = s1_tup[4]
-        t_pnum = t_tup[4]
-        if s1_pnum is not None and t_pnum is not None and s1_pnum != t_pnum:
-            exact_core = feats[1]
-            if exact_core < 1.0:
-                prob *= 0.1
         scores_dict[sid].append((tid, prob))
 
     for sid in val_s1_ids:
