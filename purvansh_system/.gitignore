@@ -1,0 +1,45 @@
+# ==============================================================================
+# Amazon ML Challenge 2026: Git Ignore Rules
+# ==============================================================================
+
+# Dataset files & raw archives (STRICTLY EXCLUDED)
+DATA/
+dataset/
+student_resource/
+*.zip
+*.tsv
+*.csv
+*.parquet
+*.tar.gz
+
+# Model weights, intermediate caches & outputs
+checkpoints/
+output/
+Trained model with output/
+*.pkl
+*.model
+
+# Python & Environment caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+venv/
+.venv/
+env/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Scratch and debug files
+scratch/
+temp/
+tmp/
