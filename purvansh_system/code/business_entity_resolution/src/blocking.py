@@ -237,48 +237,83 @@ def shard_streaming_tfidf_blocking(
 
             if USE_GPU:
                 s1_batch_gpu = cpx_sparse.csr_matrix(s1_batch)
-                scores_gpu = (s1_batch_gpu @ shard_matrix_gpu_t).tocsr()
-                scores = scores_gpu.get()
+                scores_gpu = s1_batch_gpu @ shard_matrix_gpu_t
+                
+                # Lightning-fast GPU dense top-K
+                scores_dense = scores_gpu.toarray()
+                k = min(top_k, scores_dense.shape[1])
+                
+                # Get top-k indices and scores on GPU
+                top_idx_gpu = cp.argpartition(scores_dense, -k, axis=1)[:, -k:]
+                top_scores_gpu = cp.take_along_axis(scores_dense, top_idx_gpu, axis=1)
+                
+                # Transfer tiny arrays (batch_size x k) to CPU
+                top_idx_cpu = top_idx_gpu.get()
+                top_scores_cpu = top_scores_gpu.get()
+                
+                for r in range(be - bs):
+                    sid = s1_ids[bs + r]
+                    row_scores = top_scores_cpu[r]
+                    row_idx = top_idx_cpu[r]
+                    
+                    # Filter negligible matches
+                    mask = row_scores >= min_score_threshold
+                    if not mask.any():
+                        continue
+                        
+                    valid_scores = row_scores[mask]
+                    valid_idx = row_idx[mask]
+                    
+                    new_entries = [
+                        (float(valid_scores[j]), shard_eids[valid_idx[j]])
+                        for j in range(len(valid_scores))
+                    ]
+                    
+                    existing = running_topk.get(sid, [])
+                    running_topk[sid] = _merge_topk(existing, new_entries, top_k)
+                    
+                del s1_batch_gpu, scores_gpu, scores_dense, top_idx_gpu, top_scores_gpu
+                
             else:
                 scores = (s1_batch @ shard_matrix.T).tocsr()
 
-            # Walk CSR row pointers for fast top-k extraction
-            for r in range(be - bs):
-                row_start = scores.indptr[r]
-                row_end   = scores.indptr[r + 1]
-                if row_start == row_end:
-                    continue
+                # Walk CSR row pointers for fast top-k extraction
+                for r in range(be - bs):
+                    row_start = scores.indptr[r]
+                    row_end   = scores.indptr[r + 1]
+                    if row_start == row_end:
+                        continue
 
-                row_data = scores.data[row_start:row_end]
-                row_cols = scores.indices[row_start:row_end]
+                    row_data = scores.data[row_start:row_end]
+                    row_cols = scores.indices[row_start:row_end]
 
-                # Filter negligible matches
-                mask = row_data >= min_score_threshold
-                if not mask.any():
-                    continue
-                row_data = row_data[mask]
-                row_cols = row_cols[mask]
+                    # Filter negligible matches
+                    mask = row_data >= min_score_threshold
+                    if not mask.any():
+                        continue
+                    row_data = row_data[mask]
+                    row_cols = row_cols[mask]
 
-                # Extract shard-local top-k
-                if len(row_data) <= top_k:
-                    new_entries = [
-                        (float(row_data[j]), shard_eids[row_cols[j]])
-                        for j in range(len(row_data))
-                    ]
-                else:
-                    top_idx = np.argpartition(row_data, -top_k)[-top_k:]
-                    new_entries = [
-                        (float(row_data[j]), shard_eids[row_cols[j]])
-                        for j in top_idx
-                    ]
+                    # Extract shard-local top-k
+                    if len(row_data) <= top_k:
+                        new_entries = [
+                            (float(row_data[j]), shard_eids[row_cols[j]])
+                            for j in range(len(row_data))
+                        ]
+                    else:
+                        top_idx = np.argpartition(row_data, -top_k)[-top_k:]
+                        new_entries = [
+                            (float(row_data[j]), shard_eids[row_cols[j]])
+                            for j in top_idx
+                        ]
 
-                sid = s1_ids[bs + r]
+                    sid = s1_ids[bs + r]
 
-                # Merge with running top-k across previous shards
-                existing = running_topk.get(sid, [])
-                running_topk[sid] = _merge_topk(existing, new_entries, top_k)
+                    # Merge with running top-k across previous shards
+                    existing = running_topk.get(sid, [])
+                    running_topk[sid] = _merge_topk(existing, new_entries, top_k)
 
-            del scores
+                del scores
 
         del shard_matrix, shard_eids
         gc.collect()
