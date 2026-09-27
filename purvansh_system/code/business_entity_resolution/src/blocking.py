@@ -213,10 +213,6 @@ def shard_streaming_tfidf_blocking(
     print(f"  [Blocking] Pass 2: Streaming shards (chunk={shard_chunksize:,}, "
           f"batch={s1_batch_size:,})...", flush=True)
 
-    if USE_GPU:
-        print("  [GPU] Loading S1 matrix into VRAM (cupy)...", flush=True)
-        s1_matrix_gpu = cpx_sparse.csr_matrix(s1_matrix)
-
     for shard_eids, shard_texts in _stream_candidate_shards(cand_paths, country, shard_chunksize):
         shard_count += 1
         shard_size = len(shard_eids)
@@ -236,12 +232,15 @@ def shard_streaming_tfidf_blocking(
             
         for bs in range(0, n_s1, s1_batch_size):
             be = min(bs + s1_batch_size, n_s1)
+            
+            s1_batch = s1_matrix[bs:be]
 
             if USE_GPU:
-                scores_gpu = (s1_matrix_gpu[bs:be] @ shard_matrix_gpu_t).tocsr()
+                s1_batch_gpu = cpx_sparse.csr_matrix(s1_batch)
+                scores_gpu = (s1_batch_gpu @ shard_matrix_gpu_t).tocsr()
                 scores = scores_gpu.get()
             else:
-                scores = (s1_matrix[bs:be] @ shard_matrix.T).tocsr()
+                scores = (s1_batch @ shard_matrix.T).tocsr()
 
             # Walk CSR row pointers for fast top-k extraction
             for r in range(be - bs):
