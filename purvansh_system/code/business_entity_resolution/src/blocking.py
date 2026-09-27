@@ -208,7 +208,7 @@ def shard_streaming_tfidf_blocking(
     running_topk = {}         # sid -> [(score, cid), ...]
     shard_count = 0
     total_candidates = 0
-    min_score_threshold = 0.01   # ignore negligible cosine matches
+    min_score_threshold = 0.05   # aggressive filter to speed up CPU sorting
 
     print(f"  [Blocking] Pass 2: Streaming shards (chunk={shard_chunksize:,}, "
           f"batch={s1_batch_size:,})...", flush=True)
