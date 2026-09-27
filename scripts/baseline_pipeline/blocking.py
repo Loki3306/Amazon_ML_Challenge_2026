@@ -102,6 +102,12 @@ def get_blocking_keys_from_preprocessed(c_n, core_n, c_a, nums):
                 w1, w2 = sorted([sig_addr_words[i], sig_addr_words[j]])
                 keys.add(('addr_pair', f'{w1}_{w2}'))
 
+    # 10. Phonetic hashes of rare address words
+    for w in sig_addr_words[:4]:
+        phon_hash = jellyfish.metaphone(w)
+        if phon_hash:
+            keys.add(('phon_addr', phon_hash))
+
     return keys
 
 

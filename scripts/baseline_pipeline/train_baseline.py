@@ -205,24 +205,14 @@ def main():
     s1_names = [s1_preprocessed[sid][0] for sid in s1_id_to_idx.keys()]
     target_names = [target_preprocessed[tid][0] for tid in target_id_to_idx.keys()]
     
-    s1_addrs = [s1_preprocessed[sid][2] for sid in s1_id_to_idx.keys()]
-    target_addrs = [target_preprocessed[tid][2] for tid in target_id_to_idx.keys()]
-    
     tfidf_vec = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4), max_df=0.8, min_df=2)
     tfidf_vec.fit(s1_names + target_names)
     os.makedirs('models', exist_ok=True)
     joblib.dump(tfidf_vec, 'models/tfidf_name.pkl')
     
-    tfidf_addr_vec = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 5), max_df=0.8, min_df=2)
-    tfidf_addr_vec.fit(s1_addrs + target_addrs)
-    joblib.dump(tfidf_addr_vec, 'models/tfidf_addr.pkl')
-    
     print('Transforming TF-IDF matrices...')
     s1_tfidf_mat = tfidf_vec.transform(s1_names)
     target_tfidf_mat = tfidf_vec.transform(target_names)
-    
-    s1_addr_tfidf_mat = tfidf_addr_vec.transform(s1_addrs)
-    target_addr_tfidf_mat = tfidf_addr_vec.transform(target_addrs)
     
     print('Encoding Semantic Vectors (all-MiniLM-L6-v2)...')
     # Use CPU by default, it takes ~2 mins for 600k strings on Kaggle
@@ -270,7 +260,6 @@ def main():
         s1_tup = s1_preprocessed[sid][:5]
         sid_idx = s1_id_to_idx[sid]
         s1_vec = s1_tfidf_mat[sid_idx]
-        s1_addr_vec = s1_addr_tfidf_mat[sid_idx]
 
         for mid in true_mids:
             if mid in target_preprocessed:
@@ -278,11 +267,9 @@ def main():
                 sh = cand_mids.get(mid, 1)
                 t_idx = target_id_to_idx[mid]
                 t_vec = target_tfidf_mat[t_idx]
-                t_addr_vec = target_addr_tfidf_mat[t_idx]
                 tfidf_sim = float(s1_vec.multiply(t_vec).sum())
-                addr_tfidf_sim = float(s1_addr_vec.multiply(t_addr_vec).sum())
                 semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
-                feats = extract_features_for_pair(s1_tup, t_tup, mid, sh, tfidf_sim, semantic_sim, addr_tfidf_sim)
+                feats = extract_features_for_pair(s1_tup, t_tup, mid, sh, tfidf_sim, semantic_sim)
                 X_train.append(feats)
                 y_train.append(1)
 
@@ -294,11 +281,9 @@ def main():
                 t_tup = target_preprocessed[tid][:5]
                 t_idx = target_id_to_idx[tid]
                 t_vec = target_tfidf_mat[t_idx]
-                t_addr_vec = target_addr_tfidf_mat[t_idx]
                 tfidf_sim = float(s1_vec.multiply(t_vec).sum())
-                addr_tfidf_sim = float(s1_addr_vec.multiply(t_addr_vec).sum())
                 semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
-                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim, semantic_sim, addr_tfidf_sim)
+                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim, semantic_sim)
                 X_train.append(feats)
                 y_train.append(0)
                 neg_count += 1
@@ -348,18 +333,15 @@ def main():
         s1_tup = s1_preprocessed[sid][:5]
         sid_idx = s1_id_to_idx[sid]
         s1_vec = s1_tfidf_mat[sid_idx]
-        s1_addr_vec = s1_addr_tfidf_mat[sid_idx]
         
         for tid, sh in cands:
             if tid in target_preprocessed:
                 t_tup = target_preprocessed[tid][:5]
                 t_idx = target_id_to_idx[tid]
                 t_vec = target_tfidf_mat[t_idx]
-                t_addr_vec = target_addr_tfidf_mat[t_idx]
                 tfidf_sim = float(s1_vec.multiply(t_vec).sum())
-                addr_tfidf_sim = float(s1_addr_vec.multiply(t_addr_vec).sum())
                 semantic_sim = float(np.dot(s1_embeddings[sid_idx], t_embeddings[t_idx]))
-                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim, semantic_sim, addr_tfidf_sim)
+                feats = extract_features_for_pair(s1_tup, t_tup, tid, sh, tfidf_sim, semantic_sim)
                 val_pair_list.append((sid, tid, feats, s1_tup, t_tup))
 
     X_val = np.array([p[2] for p in val_pair_list], dtype=np.float32)
