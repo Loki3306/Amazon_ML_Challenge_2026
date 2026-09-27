@@ -503,16 +503,35 @@ def main():
         if sid not in scores_dict:
             scores_dict[sid] = []
 
-    # Grid search optimal thresholds with bipartite 1-to-1 consistency
-    print('Optimizing source-specific thresholds with 1-to-1 deduplication...')
+    print('Optimizing source-specific thresholds with 1-to-1 deduplication (Fast Pre-sort)...')
     best_f05 = -1.0
     best_s2 = 0.50
     best_s3 = 0.50
     best_metrics = None
 
+    # Pre-sort ALL predictions exactly once to avoid 40-minute grid search loops
+    all_pairs = []
+    for s1_id, scores in scores_dict.items():
+        for tid, p in scores:
+            all_pairs.append((p, s1_id, tid))
+    all_pairs.sort(key=lambda x: x[0], reverse=True)
+
     for t2 in np.linspace(0.05, 0.95, 20):
         for t3 in np.linspace(0.05, 0.95, 20):
-            preds = apply_threshold_and_deduplication(scores_dict, t2, t3)
+            assigned_targets = set()
+            preds = collections.defaultdict(set)
+            for p, s1_id, tid in all_pairs:
+                t = t2 if tid.startswith('S2-') else t3
+                if p >= t:
+                    if tid not in assigned_targets:
+                        assigned_targets.add(tid)
+                        preds[s1_id].add(tid)
+            
+            # Ensure every S1 ID is in the preds dict
+            for sid in val_s1_ids:
+                if sid not in preds:
+                    preds[sid] = set()
+                    
             metrics = evaluate_predictions(val_gt, preds)
             if metrics['macro_f05'] > best_f05:
                 best_f05 = metrics['macro_f05']
@@ -520,7 +539,18 @@ def main():
                 best_s3 = t3
                 best_metrics = metrics
 
-    opt_preds = apply_threshold_and_deduplication(scores_dict, best_s2, best_s3)
+    # Generate final optimal predictions
+    assigned_targets = set()
+    opt_preds = collections.defaultdict(set)
+    for p, s1_id, tid in all_pairs:
+        t = best_s2 if tid.startswith('S2-') else best_s3
+        if p >= t:
+            if tid not in assigned_targets:
+                assigned_targets.add(tid)
+                opt_preds[s1_id].add(tid)
+    for sid in val_s1_ids:
+        if sid not in opt_preds:
+            opt_preds[sid] = set()
     final_metrics = evaluate_predictions(val_gt, opt_preds)
     val_cand_recall = retrieved_val_true / total_val_true if total_val_true > 0 else 0.0
     conditional_recall = final_metrics['global_recall'] / val_cand_recall if val_cand_recall > 0 else 0.0

@@ -88,6 +88,7 @@ def apply_threshold_and_deduplication(candidate_scores_dict, s2_threshold=0.5, s
     for p, s1_id, tid in all_pairs:
         if tid not in assigned_targets:
             assigned_targets.add(tid)
+            result[s1_id].add(tid)
     return result
 
 
