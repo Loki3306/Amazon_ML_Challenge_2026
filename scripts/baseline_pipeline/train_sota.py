@@ -284,6 +284,7 @@ def main():
     
     if os.path.exists(train_X_path) and os.path.exists(train_y_path) and os.path.exists(train_cross_pairs_path):
         print(' -> Found cached X_train! Loading from disk...')
+        t_feat_start = time.time()
         X_train = np.load(train_X_path)
         y_train = np.load(train_y_path)
         cross_pairs_train = joblib.load(train_cross_pairs_path)
@@ -344,46 +345,44 @@ def main():
                         break
             return local_X, local_y, local_cross_pairs
 
-    from joblib import Parallel, delayed
-    results = Parallel(n_jobs=-1, backend='threading')(
-        delayed(process_train_sid)(sid) for sid in train_s1_ids
-    )
-    
-    cross_pairs_train = []
-    for rx, ry, rc in results:
-        X_train.extend(rx)
-        y_train.extend(ry)
-        cross_pairs_train.extend(rc)
+        from joblib import Parallel, delayed
+        results = Parallel(n_jobs=-1, backend='threading')(
+            delayed(process_train_sid)(sid) for sid in train_s1_ids
+        )
+        
+        cross_pairs_train = []
+        for rx, ry, rc in results:
+            X_train.extend(rx)
+            y_train.extend(ry)
+            cross_pairs_train.extend(rc)
 
-    print('Scoring Training Pairs with Cross-Encoder (with Caching)...')
-    train_scores_path = os.path.join(cache_dir, 'train_cross_scores.npy')
-    if os.path.exists(train_scores_path):
-        train_cross_scores = np.load(train_scores_path)
-        if len(train_cross_scores) == len(cross_pairs_train):
-            print(' -> Found cached train cross-encoder scores!')
+        print('Scoring Training Pairs with Cross-Encoder (with Caching)...')
+        train_scores_path = os.path.join(cache_dir, 'train_cross_scores.npy')
+        if os.path.exists(train_scores_path):
+            train_cross_scores = np.load(train_scores_path)
+            if 'cross_pairs_train' not in locals() or len(train_cross_scores) == len(cross_pairs_train):
+                print(' -> Found cached train cross-encoder scores!')
+            else:
+                print(' -> Cache size mismatch! Re-running train cross-encoder...')
+                train_cross_scores = cross_encoder.predict(cross_pairs_train, batch_size=512, show_progress_bar=True)
+                np.save(train_scores_path, train_cross_scores)
         else:
-            print(' -> Cache size mismatch! Re-running train cross-encoder...')
             train_cross_scores = cross_encoder.predict(cross_pairs_train, batch_size=512, show_progress_bar=True)
             np.save(train_scores_path, train_cross_scores)
-    else:
-        train_cross_scores = cross_encoder.predict(cross_pairs_train, batch_size=512, show_progress_bar=True)
-        np.save(train_scores_path, train_cross_scores)
-    
-    # Inject cross scores into X_train (it's the 4th feature from the end, index -4)
-    # feats structure: ..., tfidf, semantic, addr_semantic, cross_score, missing_flags...
-    for i in range(len(X_train)):
-        # Convert raw logits to probability 0-1
-        prob = 1.0 / (1.0 + math.exp(-train_cross_scores[i]))
-        X_train[i][-4] = float(prob)
+        
+        # Inject cross scores into X_train (it's the 4th feature from the end, index -4)
+        for i in range(len(X_train)):
+            prob = 1.0 / (1.0 + math.exp(-train_cross_scores[i]))
+            X_train[i][-4] = float(prob)
 
-    X_train = np.array(X_train, dtype=np.float32)
-    y_train = np.array(y_train, dtype=np.int32)
-    
-    # Cache the CPU features so we don't have to extract them again
-    print('Saving extracted training features to disk...')
-    np.save(train_X_path, X_train)
-    np.save(train_y_path, y_train)
-    joblib.dump(cross_pairs_train, train_cross_pairs_path)
+        X_train = np.array(X_train, dtype=np.float32)
+        y_train = np.array(y_train, dtype=np.int32)
+        
+        # Cache the CPU features so we don't have to extract them again
+        print('Saving extracted training features to disk...')
+        np.save(train_X_path, X_train)
+        np.save(train_y_path, y_train)
+        joblib.dump(cross_pairs_train, train_cross_pairs_path)
 
     pos_count = int(np.sum(y_train))
     neg_count = len(y_train) - pos_count
