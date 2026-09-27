@@ -378,6 +378,13 @@ def main():
 
     X_train = np.array(X_train, dtype=np.float32)
     y_train = np.array(y_train, dtype=np.int32)
+    
+    # Cache the CPU features so we don't have to extract them again
+    print('Saving extracted training features to disk...')
+    np.save(train_X_path, X_train)
+    np.save(train_y_path, y_train)
+    joblib.dump(cross_pairs_train, train_cross_pairs_path)
+
     pos_count = int(np.sum(y_train))
     neg_count = len(y_train) - pos_count
     print(f'Training dataset: X_train shape = {X_train.shape} (Positives = {pos_count:,}, Negatives = {neg_count:,}) in {time.time()-t_feat_start:.1f}s.')
@@ -477,6 +484,14 @@ def main():
         val_pair_list[i][2][-4] = float(prob)
 
     X_val = np.array([p[2] for p in val_pair_list], dtype=np.float32)
+    
+    # Save the extracted validation features to disk
+    val_X_path = os.path.join(cache_dir, 'val_X.npy')
+    val_pairs_path = os.path.join(cache_dir, 'val_pair_list.pkl')
+    print('Saving extracted validation features to disk...')
+    np.save(val_X_path, X_val)
+    joblib.dump(val_pair_list, val_pairs_path)
+    
     val_probas = final_model.predict_proba(X_val)
 
     scores_dict = collections.defaultdict(list)
@@ -495,8 +510,8 @@ def main():
     best_s3 = 0.50
     best_metrics = None
 
-    for t2 in np.linspace(0.40, 0.99, 15):
-        for t3 in np.linspace(0.40, 0.99, 15):
+    for t2 in np.linspace(0.05, 0.95, 20):
+        for t3 in np.linspace(0.05, 0.95, 20):
             preds = apply_threshold_and_deduplication(scores_dict, t2, t3)
             metrics = evaluate_predictions(val_gt, preds)
             if metrics['macro_f05'] > best_f05:
