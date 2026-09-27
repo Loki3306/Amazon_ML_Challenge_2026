@@ -223,7 +223,7 @@ def main():
     target_combined = [f"{target_preprocessed[tid][0]} {target_preprocessed[tid][2]} {target_preprocessed[tid][5]}" for tid in target_id_to_idx.keys()]
     
     print('Encoding Semantic Vectors (all-MiniLM-L6-v2) on GPU (with Caching)...')
-    cache_dir = os.path.join(args.model_dir, 'cache')
+    cache_dir = os.path.join(os.path.dirname(args.model_out), 'cache')
     os.makedirs(cache_dir, exist_ok=True)
     
     t_emb_path = os.path.join(cache_dir, 't_embeddings.npy')
